@@ -188,7 +188,11 @@ No se codifica ni inventa un dominio. Configurar `VITE_SITE_URL` con el origen H
 npm run generate:sitemap
 ```
 
-El generador escribe `dist/sitemap.xml` y agrega su URL absoluta en `dist/robots.txt`. Consulta solamente documentos publicados/no archivados de `posts` y `programs`, pagina en lotes, omite slugs inválidos e incluye rutas públicas estables; no incorpora `/buscar`, `/admin` ni documentos privados. Requiere acceso de red a Firestore, reglas e índices operativos. Falla explícitamente si falta el dominio/proyecto o la consulta cloud es rechazada. Hay que volver a generarlo tras publicar cambios y enviar el sitemap al buscador; el comando no se incluye en `npm run build` para mantener builds locales y CI sin Firebase utilizables.
+El generador escribe `dist/sitemap.xml` y agrega su URL absoluta en `dist/robots.txt`. Consulta únicamente documentos con `status == published` e `isArchived == false`, que son exactamente las condiciones de `isPublicRecord()` en `firestore.rules`, pagina en lotes, valida nuevamente esos campos y omite slugs inválidos. No incorpora `/buscar`, `/admin` ni documentos privados. La consulta usa la API REST pública de Firestore, sin Admin SDK ni credenciales privilegiadas; por ello queda sujeta a las reglas publicadas y solo debe poder leer documentos públicos.
+
+Si Firestore rechaza temporalmente una colección (incluido 403), el generador registra un warning y escribe un sitemap válido con rutas estáticas y con documentos recuperados completamente de las demás colecciones. No debilita las reglas ni considera éxito una inclusión parcial de una colección fallida. Si `VITE_FIREBASE_PROJECT_ID` está ausente, también produce el sitemap estático; `VITE_SITE_URL` sigue siendo obligatorio para formar URLs absolutas. Revisa los warnings del build y corrige reglas, proyecto o disponibilidad de Firestore para que noticias y programas publicados aparezcan en el sitemap. El sitemap estático de fallback no contiene las URLs editoriales dinámicas. Volver a generarlo después de publicar cambios y enviarlo al buscador; no se incluye en `npm run build` para mantener builds locales sin Firebase utilizables.
+
+Las reglas fuente permiten lecturas anónimas en `posts` y `programs` solamente para registros que satisfacen `status == 'published'` e `isArchived == false`; el query de sitemap incluye ambos filtros y no necesita Admin SDK. Un 403 en producción no se corrige abriendo permisos: comparar las reglas activas del mismo `VITE_FIREBASE_PROJECT_ID` con `firestore.rules`, confirmar que Firestore está creado/activo y que los documentos usan esos campos. El código local de reglas no se aplica automáticamente a Firebase.
 
 ### Banners
 
@@ -222,7 +226,7 @@ npm run typecheck
 npm run lint
 ```
 
-`npm run build` incluye la compilación TypeScript del proyecto. Las pruebas de extremo a extremo y la Emulator Suite no están configuradas en este repositorio; no se han probado ciclos reales con Firestore/Storage, ya que el proyecto no proporciona credenciales y este entorno no tiene Java para los emuladores.
+`npm run build` incluye la compilación TypeScript del proyecto. `npm test` ejecuta pruebas unitarias Node para el filtro de documentos públicos, el shape de la consulta REST y el fallback del sitemap ante errores de permisos. Las pruebas de extremo a extremo y la Emulator Suite no están configuradas en este repositorio; no se han probado ciclos reales con Firestore/Storage, ya que el proyecto no proporciona credenciales y este entorno no tiene Java para los emuladores.
 
 ## Preparación y publicación en producción
 
