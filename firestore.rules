@@ -1,0 +1,368 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSuperadmin() {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.superadmin == true;
+    }
+
+    function isEditor() {
+      return isSuperadmin()
+        || (signedIn()
+          && request.auth.token.email_verified == true
+          && request.auth.token.editor == true);
+    }
+
+    function validString(value, maxLength) {
+      return value is string && value.size() > 0 && value.size() <= maxLength;
+    }
+
+    function validSlug(value) {
+      return value is string && value.matches('^[a-z0-9]+(-[a-z0-9]+)*$');
+    }
+
+    function baseFields() {
+      return [
+        'status',
+        'isArchived',
+        'createdAt',
+        'updatedAt',
+        'createdBy',
+        'updatedBy'
+      ];
+    }
+
+    function validBaseRecord() {
+      return request.resource.data.status in ['draft', 'published', 'archived']
+        && request.resource.data.isArchived is bool
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp
+        && validString(request.resource.data.createdBy, 128)
+        && validString(request.resource.data.updatedBy, 128)
+        && (
+          (request.resource.data.status == 'archived' && request.resource.data.isArchived == true)
+          || (request.resource.data.status in ['draft', 'published'] && request.resource.data.isArchived == false)
+        )
+        && (
+          request.resource.data.status != 'published'
+          || request.resource.data.publishedAt is timestamp
+        );
+    }
+
+    function hasAllowedFields(collectionName) {
+      return (
+        collectionName == 'programs'
+        && request.resource.data.keys().hasOnly(baseFields().concat([
+          'title', 'slug', 'description', 'categoryId', 'hostNames', 'imageMediaId',
+          'durationMinutes', 'socialLinks', 'searchTerms', 'publishedAt'
+        ]))
+        && request.resource.data.keys().hasAll([
+          'title', 'slug', 'description', 'categoryId', 'hostNames', 'imageMediaId', 'durationMinutes'
+        ])
+      ) || (
+        collectionName == 'schedule'
+        && request.resource.data.keys().hasOnly(baseFields().concat([
+          'programId', 'dayOfWeek', 'startTime', 'endTime', 'timeZone', 'publishedAt'
+        ]))
+        && request.resource.data.keys().hasAll([
+          'programId', 'dayOfWeek', 'startTime', 'endTime', 'timeZone'
+        ])
+      ) || (
+        collectionName == 'posts'
+        && request.resource.data.keys().hasOnly(baseFields().concat([
+          'title', 'slug', 'excerpt', 'body', 'categoryIds', 'tagIds', 'heroMediaId',
+          'authorUid', 'authorName', 'seoTitle', 'seoDescription', 'searchTerms', 'publishedAt'
+        ]))
+        && request.resource.data.keys().hasAll([
+          'title', 'slug', 'excerpt', 'body', 'categoryIds', 'tagIds', 'heroMediaId', 'authorUid'
+        ])
+      ) || (
+        collectionName == 'categories'
+        && request.resource.data.keys().hasOnly(baseFields().concat([
+          'name', 'slug', 'description', 'sortOrder', 'publishedAt'
+        ]))
+        && request.resource.data.keys().hasAll(['name', 'slug', 'description', 'sortOrder'])
+      ) || (
+        collectionName == 'tags'
+        && request.resource.data.keys().hasOnly(baseFields().concat(['name', 'slug', 'publishedAt']))
+        && request.resource.data.keys().hasAll(['name', 'slug'])
+      ) || (
+        collectionName == 'media'
+        && request.resource.data.keys().hasOnly(baseFields().concat([
+          'originalName', 'storagePath', 'contentType', 'sizeBytes', 'altText',
+          'visibility', 'publishedAt'
+        ]))
+        && request.resource.data.keys().hasAll([
+          'originalName', 'storagePath', 'contentType', 'sizeBytes', 'altText', 'visibility'
+        ])
+      ) || (
+        collectionName == 'banners'
+        && request.resource.data.keys().hasOnly(baseFields().concat([
+          'label', 'placement', 'mediaId', 'altText', 'sortOrder', 'targetUrl', 'startsAt', 'endsAt', 'publishedAt'
+        ]))
+        && request.resource.data.keys().hasAll([
+          'label', 'placement', 'mediaId', 'targetUrl', 'startsAt', 'endsAt'
+        ])
+      );
+    }
+
+    function validRecord(collectionName) {
+      return validBaseRecord()
+        && hasAllowedFields(collectionName)
+        && (
+          collectionName == 'programs'
+          && validString(request.resource.data.title, 180)
+          && validSlug(request.resource.data.slug)
+          && validString(request.resource.data.description, 5000)
+          && validString(request.resource.data.categoryId, 128)
+          && request.resource.data.hostNames is list
+          && request.resource.data.hostNames.size() <= 10
+          && (request.resource.data.imageMediaId == null || request.resource.data.imageMediaId is string)
+          && (!('searchTerms' in request.resource.data)
+            || (request.resource.data.searchTerms is list
+              && request.resource.data.searchTerms.size() <= 100))
+          && (request.resource.data.durationMinutes == null
+            || (request.resource.data.durationMinutes is int
+              && request.resource.data.durationMinutes >= 1
+              && request.resource.data.durationMinutes <= 1440))
+          && (!('socialLinks' in request.resource.data)
+            || (request.resource.data.socialLinks is map
+              && validSocialLinks(request.resource.data.socialLinks)))
+        ) || (
+          validBaseRecord()
+          && hasAllowedFields(collectionName)
+          && collectionName == 'schedule'
+          && validString(request.resource.data.programId, 128)
+          && request.resource.data.dayOfWeek is int
+          && request.resource.data.dayOfWeek >= 0
+          && request.resource.data.dayOfWeek <= 6
+          && request.resource.data.startTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+          && request.resource.data.endTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+          && validString(request.resource.data.timeZone, 80)
+        ) || (
+          validBaseRecord()
+          && hasAllowedFields(collectionName)
+          && collectionName == 'posts'
+          && validString(request.resource.data.title, 180)
+          && validSlug(request.resource.data.slug)
+          && validString(request.resource.data.excerpt, 500)
+          && validString(request.resource.data.body, 100000)
+          && request.resource.data.categoryIds is list
+          && request.resource.data.categoryIds.size() <= 20
+          && request.resource.data.tagIds is list
+          && request.resource.data.tagIds.size() <= 30
+          && (request.resource.data.heroMediaId == null || request.resource.data.heroMediaId is string)
+          && validString(request.resource.data.authorUid, 128)
+          && (!('authorName' in request.resource.data)
+            || (request.resource.data.authorName is string
+              && request.resource.data.authorName.size() <= 120))
+          && (!('searchTerms' in request.resource.data)
+            || (request.resource.data.searchTerms is list
+              && request.resource.data.searchTerms.size() <= 100))
+          && (!('seoTitle' in request.resource.data)
+            || (request.resource.data.seoTitle is string
+              && request.resource.data.seoTitle.size() <= 180))
+          && (!('seoDescription' in request.resource.data)
+            || (request.resource.data.seoDescription is string
+              && request.resource.data.seoDescription.size() <= 320))
+        ) || (
+          validBaseRecord()
+          && hasAllowedFields(collectionName)
+          && collectionName == 'categories'
+          && validString(request.resource.data.name, 100)
+          && validSlug(request.resource.data.slug)
+          && request.resource.data.description is string
+          && request.resource.data.description.size() <= 500
+          && request.resource.data.sortOrder is int
+          && request.resource.data.sortOrder >= 0
+        ) || (
+          validBaseRecord()
+          && hasAllowedFields(collectionName)
+          && collectionName == 'tags'
+          && validString(request.resource.data.name, 60)
+          && validSlug(request.resource.data.slug)
+        ) || (
+          validBaseRecord()
+          && hasAllowedFields(collectionName)
+          && collectionName == 'media'
+          && validString(request.resource.data.originalName, 180)
+          && request.resource.data.storagePath.matches('^media/[A-Za-z0-9._-]+$')
+          && request.resource.data.contentType in [
+            'image/jpeg', 'image/png', 'image/webp', 'image/avif',
+            'audio/mpeg', 'audio/aac', 'audio/ogg', 'audio/wav', 'video/mp4'
+          ]
+          && request.resource.data.sizeBytes is int
+          && request.resource.data.sizeBytes > 0
+          && request.resource.data.sizeBytes <= 52428800
+          && request.resource.data.altText is string
+          && request.resource.data.altText.size() <= 500
+          && request.resource.data.visibility in ['private', 'public']
+        ) || (
+          validBaseRecord()
+          && hasAllowedFields(collectionName)
+          && collectionName == 'banners'
+          && validString(request.resource.data.label, 120)
+          && request.resource.data.placement in ['home-top', 'home-feed', 'news', 'programs', 'footer']
+          && validString(request.resource.data.mediaId, 128)
+          && (!('altText' in request.resource.data)
+            || (request.resource.data.altText is string
+              && request.resource.data.altText.size() <= 500))
+          && (!('sortOrder' in request.resource.data)
+            || (request.resource.data.sortOrder is int
+              && request.resource.data.sortOrder >= 0
+              && request.resource.data.sortOrder <= 10000))
+          && (request.resource.data.targetUrl == null
+            || (request.resource.data.targetUrl is string
+              && request.resource.data.targetUrl.matches('^https://[^ ]+$')))
+          && (request.resource.data.startsAt == null || request.resource.data.startsAt is timestamp)
+          && (request.resource.data.endsAt == null || request.resource.data.endsAt is timestamp)
+          && (request.resource.data.startsAt == null
+            || request.resource.data.endsAt == null
+            || request.resource.data.startsAt < request.resource.data.endsAt)
+        );
+    }
+
+    function isPublicRecord() {
+      return resource.data.status == 'published'
+        && resource.data.isArchived == false;
+    }
+
+    function validSocialLinks(links) {
+      return links.keys().hasOnly(['instagram', 'facebook', 'youtube'])
+        && (!('instagram' in links)
+          || (links.instagram is string
+            && links.instagram.size() <= 500
+            && (links.instagram == '' || links.instagram.matches('^https://[^ ]+$'))))
+        && (!('facebook' in links)
+          || (links.facebook is string
+            && links.facebook.size() <= 500
+            && (links.facebook == '' || links.facebook.matches('^https://[^ ]+$'))))
+        && (!('youtube' in links)
+          || (links.youtube is string
+            && links.youtube.size() <= 500
+            && (links.youtube == '' || links.youtube.matches('^https://[^ ]+$'))));
+    }
+
+    function isEditorialCollection(collectionName) {
+      return collectionName in [
+        'programs', 'schedule', 'posts', 'categories', 'tags', 'media', 'banners'
+      ];
+    }
+
+    function canEditCollection(collectionName) {
+      return (collectionName in ['media', 'banners'] && isSuperadmin())
+        || (!(collectionName in ['media', 'banners']) && isEditor());
+    }
+
+    match /publicConfig/{documentId} {
+      allow read: if documentId == 'site'
+        && resource.data.keys().hasOnly([
+          'stationName', 'slogan', 'streamUrl', 'stationTimeZone', 'contactEmail', 'contactPhone',
+          'whatsappUrl', 'socialLinks', 'updatedAt'
+        ]);
+      allow create, update: if isSuperadmin()
+        && documentId == 'site'
+        && request.resource.data.keys().hasOnly([
+          'stationName', 'slogan', 'streamUrl', 'stationTimeZone', 'contactEmail', 'contactPhone',
+          'whatsappUrl', 'socialLinks', 'updatedAt'
+        ])
+        && request.resource.data.keys().hasAll([
+          'stationName', 'slogan', 'streamUrl', 'stationTimeZone', 'contactEmail', 'contactPhone',
+          'whatsappUrl', 'socialLinks', 'updatedAt'
+        ])
+        && validString(request.resource.data.stationName, 100)
+        && request.resource.data.slogan is string
+        && request.resource.data.slogan.size() <= 240
+        && request.resource.data.socialLinks is map
+        && validSocialLinks(request.resource.data.socialLinks)
+        && (request.resource.data.streamUrl == null
+          || (request.resource.data.streamUrl is string
+            && request.resource.data.streamUrl.matches('^https?://[^/@ ]+([/?#][^ ]*)?$')))
+        && validString(request.resource.data.stationTimeZone, 80)
+        && (request.resource.data.contactEmail == null
+          || (request.resource.data.contactEmail is string
+            && request.resource.data.contactEmail.size() <= 254))
+        && (request.resource.data.contactPhone == null
+          || (request.resource.data.contactPhone is string
+            && request.resource.data.contactPhone.size() <= 40))
+        && (request.resource.data.whatsappUrl == null
+          || (request.resource.data.whatsappUrl is string
+            && request.resource.data.whatsappUrl.matches('^https://[^ ]+$')))
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && (request.auth.uid == userId || isSuperadmin());
+      allow write: if false;
+    }
+
+    match /privateConfig/{documentId} {
+      allow read: if isSuperadmin();
+      allow write: if false;
+    }
+
+    match /adminLogs/{logId} {
+      allow read: if isSuperadmin();
+      allow create: if isEditor()
+        && request.resource.data.keys().hasOnly([
+          'actorUid', 'action', 'collection', 'documentId', 'createdAt', 'summary'
+        ])
+        && request.resource.data.actorUid == request.auth.uid
+        && request.resource.data.action in [
+          'create', 'update', 'archive', 'publish', 'visibility-change'
+        ]
+        && validString(request.resource.data.collection, 80)
+        && validString(request.resource.data.documentId, 128)
+        && request.resource.data.createdAt == request.time
+        && validString(request.resource.data.summary, 240);
+      allow update, delete: if false;
+    }
+
+    match /{collectionName}/{documentId} {
+      allow read: if isEditorialCollection(collectionName)
+        && (
+          (collectionName in ['media', 'banners']
+            && (isSuperadmin()
+              || (isPublicRecord()
+                && (collectionName != 'media' || resource.data.visibility == 'public'))))
+          || (!(collectionName in ['media', 'banners'])
+            && (isEditor() || isPublicRecord()))
+        );
+      allow create: if isEditorialCollection(collectionName)
+        && canEditCollection(collectionName)
+        && isEditor()
+        && validRecord(collectionName)
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isEditorialCollection(collectionName)
+        && canEditCollection(collectionName)
+        && validRecord(collectionName)
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.updatedAt == request.time
+        && (
+          request.resource.data.isArchived == resource.data.isArchived
+          || (
+            resource.data.isArchived == false
+            && request.resource.data.isArchived == true
+            && request.resource.data.status == 'archived'
+          )
+        )
+        && (resource.data.isArchived != true || request.resource.data.status == 'archived');
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
