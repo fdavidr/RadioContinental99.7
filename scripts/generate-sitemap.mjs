@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { assertProductionSiteUrl } from './site-config.mjs'
 
 const root = process.cwd()
 const PAGE_SIZE = 1000
@@ -176,8 +177,10 @@ async function main() {
     await loadEnvironmentFile(resolve(root, file))
   }
 
+  const siteUrl = process.env.VITE_SITE_URL?.trim()
+  assertProductionSiteUrl(siteUrl)
   await generateSitemap({
-    siteUrl: process.env.VITE_SITE_URL?.trim(),
+    siteUrl,
     projectId: process.env.VITE_FIREBASE_PROJECT_ID?.trim(),
     apiKey: process.env.VITE_FIREBASE_API_KEY?.trim(),
   })

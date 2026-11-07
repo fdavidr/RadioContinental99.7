@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { PRODUCTION_SITE_URL } from './site-config.mjs'
 
 const root = process.cwd()
 
@@ -56,6 +57,9 @@ if (missing.length > 0) {
   process.exitCode = 1
 } else if (!siteOrigin) {
   console.error('VITE_SITE_URL debe ser el origen HTTPS real, sin ruta, credenciales ni barra final.')
+  process.exitCode = 1
+} else if (siteOrigin !== PRODUCTION_SITE_URL) {
+  console.error(`VITE_SITE_URL debe ser exactamente ${PRODUCTION_SITE_URL} para producción.`)
   process.exitCode = 1
 } else if (process.env.VITE_USE_FIREBASE_EMULATORS?.trim().toLowerCase() === 'true') {
   console.error('VITE_USE_FIREBASE_EMULATORS no puede estar habilitado para preparar producción.')
