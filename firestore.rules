@@ -55,175 +55,172 @@ service cloud.firestore {
     }
 
     function hasAllowedFields(collectionName) {
-      return (
-        collectionName == 'programs'
-        && request.resource.data.keys().hasOnly(baseFields().concat([
+      return collectionName == 'programs'
+        ? request.resource.data.keys().hasOnly(baseFields().concat([
           'title', 'slug', 'description', 'categoryId', 'hostNames', 'imageMediaId',
           'durationMinutes', 'socialLinks', 'searchTerms', 'publishedAt'
         ]))
         && request.resource.data.keys().hasAll([
           'title', 'slug', 'description', 'categoryId', 'hostNames', 'imageMediaId', 'durationMinutes'
         ])
-      ) || (
-        collectionName == 'schedule'
-        && request.resource.data.keys().hasOnly(baseFields().concat([
+        : collectionName == 'schedule'
+        ? request.resource.data.keys().hasOnly(baseFields().concat([
           'programId', 'dayOfWeek', 'startTime', 'endTime', 'timeZone', 'publishedAt'
         ]))
         && request.resource.data.keys().hasAll([
           'programId', 'dayOfWeek', 'startTime', 'endTime', 'timeZone'
         ])
-      ) || (
-        collectionName == 'posts'
-        && request.resource.data.keys().hasOnly(baseFields().concat([
+        : collectionName == 'posts'
+        ? request.resource.data.keys().hasOnly(baseFields().concat([
           'title', 'slug', 'excerpt', 'body', 'categoryIds', 'tagIds', 'heroMediaId',
           'authorUid', 'authorName', 'seoTitle', 'seoDescription', 'searchTerms', 'publishedAt'
         ]))
         && request.resource.data.keys().hasAll([
           'title', 'slug', 'excerpt', 'body', 'categoryIds', 'tagIds', 'heroMediaId', 'authorUid'
         ])
-      ) || (
-        collectionName == 'categories'
-        && request.resource.data.keys().hasOnly(baseFields().concat([
+        : collectionName == 'categories'
+        ? request.resource.data.keys().hasOnly(baseFields().concat([
           'name', 'slug', 'description', 'sortOrder', 'publishedAt'
         ]))
         && request.resource.data.keys().hasAll(['name', 'slug', 'description', 'sortOrder'])
-      ) || (
-        collectionName == 'tags'
-        && request.resource.data.keys().hasOnly(baseFields().concat(['name', 'slug', 'publishedAt']))
+        : collectionName == 'tags'
+        ? request.resource.data.keys().hasOnly(baseFields().concat(['name', 'slug', 'publishedAt']))
         && request.resource.data.keys().hasAll(['name', 'slug'])
-      ) || (
-        collectionName == 'media'
-        && request.resource.data.keys().hasOnly(baseFields().concat([
+        : collectionName == 'media'
+        ? request.resource.data.keys().hasOnly(baseFields().concat([
           'originalName', 'storagePath', 'contentType', 'sizeBytes', 'altText',
           'visibility', 'publishedAt'
         ]))
         && request.resource.data.keys().hasAll([
           'originalName', 'storagePath', 'contentType', 'sizeBytes', 'altText', 'visibility'
         ])
-      ) || (
-        collectionName == 'banners'
-        && request.resource.data.keys().hasOnly(baseFields().concat([
+        : collectionName == 'banners'
+        ? request.resource.data.keys().hasOnly(baseFields().concat([
           'label', 'placement', 'mediaId', 'altText', 'sortOrder', 'targetUrl', 'startsAt', 'endsAt', 'publishedAt'
         ]))
         && request.resource.data.keys().hasAll([
           'label', 'placement', 'mediaId', 'targetUrl', 'startsAt', 'endsAt'
         ])
-      );
+        : false;
+    }
+
+    function validProgramRecord() {
+      return validString(request.resource.data.title, 180)
+        && validSlug(request.resource.data.slug)
+        && validString(request.resource.data.description, 5000)
+        && validString(request.resource.data.categoryId, 128)
+        && request.resource.data.hostNames is list
+        && request.resource.data.hostNames.size() <= 10
+        && (request.resource.data.imageMediaId == null || request.resource.data.imageMediaId is string)
+        && (!('searchTerms' in request.resource.data)
+          || (request.resource.data.searchTerms is list
+            && request.resource.data.searchTerms.size() <= 100))
+        && (request.resource.data.durationMinutes == null
+          || (request.resource.data.durationMinutes is int
+            && request.resource.data.durationMinutes >= 1
+            && request.resource.data.durationMinutes <= 1440))
+        && (!('socialLinks' in request.resource.data)
+          || (request.resource.data.socialLinks is map
+            && validSocialLinks(request.resource.data.socialLinks)));
+    }
+
+    function validScheduleRecord() {
+      return validString(request.resource.data.programId, 128)
+        && request.resource.data.dayOfWeek is int
+        && request.resource.data.dayOfWeek >= 0
+        && request.resource.data.dayOfWeek <= 6
+        && request.resource.data.startTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+        && request.resource.data.endTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+        && validString(request.resource.data.timeZone, 80);
+    }
+
+    function validPostRecord() {
+      return validString(request.resource.data.title, 180)
+        && validSlug(request.resource.data.slug)
+        && validString(request.resource.data.excerpt, 500)
+        && validString(request.resource.data.body, 100000)
+        && request.resource.data.categoryIds is list
+        && request.resource.data.categoryIds.size() <= 20
+        && request.resource.data.tagIds is list
+        && request.resource.data.tagIds.size() <= 30
+        && (request.resource.data.heroMediaId == null || request.resource.data.heroMediaId is string)
+        && validString(request.resource.data.authorUid, 128)
+        && (!('authorName' in request.resource.data)
+          || (request.resource.data.authorName is string
+            && request.resource.data.authorName.size() <= 120))
+        && (!('searchTerms' in request.resource.data)
+          || (request.resource.data.searchTerms is list
+            && request.resource.data.searchTerms.size() <= 100))
+        && (!('seoTitle' in request.resource.data)
+          || (request.resource.data.seoTitle is string
+            && request.resource.data.seoTitle.size() <= 180))
+        && (!('seoDescription' in request.resource.data)
+          || (request.resource.data.seoDescription is string
+            && request.resource.data.seoDescription.size() <= 320));
+    }
+
+    function validCategoryRecord() {
+      return validString(request.resource.data.name, 100)
+        && validSlug(request.resource.data.slug)
+        && request.resource.data.description is string
+        && request.resource.data.description.size() <= 500
+        && request.resource.data.sortOrder is int
+        && request.resource.data.sortOrder >= 0;
+    }
+
+    function validTagRecord() {
+      return validString(request.resource.data.name, 60)
+        && validSlug(request.resource.data.slug);
+    }
+
+    function validMediaRecord() {
+      return validString(request.resource.data.originalName, 180)
+        && request.resource.data.storagePath.matches('^media/[A-Za-z0-9._-]+$')
+        && request.resource.data.contentType in [
+          'image/jpeg', 'image/png', 'image/webp', 'image/avif',
+          'audio/mpeg', 'audio/aac', 'audio/ogg', 'audio/wav', 'video/mp4'
+        ]
+        && request.resource.data.sizeBytes is int
+        && request.resource.data.sizeBytes > 0
+        && request.resource.data.sizeBytes <= 52428800
+        && request.resource.data.altText is string
+        && request.resource.data.altText.size() <= 500
+        && request.resource.data.visibility in ['private', 'public'];
+    }
+
+    function validBannerRecord() {
+      return validString(request.resource.data.label, 120)
+        && request.resource.data.placement in ['home-top', 'home-feed', 'news', 'programs', 'footer']
+        && validString(request.resource.data.mediaId, 128)
+        && (!('altText' in request.resource.data)
+          || (request.resource.data.altText is string
+            && request.resource.data.altText.size() <= 500))
+        && (!('sortOrder' in request.resource.data)
+          || (request.resource.data.sortOrder is int
+            && request.resource.data.sortOrder >= 0
+            && request.resource.data.sortOrder <= 10000))
+        && (request.resource.data.targetUrl == null
+          || (request.resource.data.targetUrl is string
+            && request.resource.data.targetUrl.matches('^https://[^ ]+$')))
+        && (request.resource.data.startsAt == null || request.resource.data.startsAt is timestamp)
+        && (request.resource.data.endsAt == null || request.resource.data.endsAt is timestamp)
+        && (request.resource.data.startsAt == null
+          || request.resource.data.endsAt == null
+          || request.resource.data.startsAt < request.resource.data.endsAt);
     }
 
     function validRecord(collectionName) {
       return validBaseRecord()
         && hasAllowedFields(collectionName)
         && (
-          collectionName == 'programs'
-          && validString(request.resource.data.title, 180)
-          && validSlug(request.resource.data.slug)
-          && validString(request.resource.data.description, 5000)
-          && validString(request.resource.data.categoryId, 128)
-          && request.resource.data.hostNames is list
-          && request.resource.data.hostNames.size() <= 10
-          && (request.resource.data.imageMediaId == null || request.resource.data.imageMediaId is string)
-          && (!('searchTerms' in request.resource.data)
-            || (request.resource.data.searchTerms is list
-              && request.resource.data.searchTerms.size() <= 100))
-          && (request.resource.data.durationMinutes == null
-            || (request.resource.data.durationMinutes is int
-              && request.resource.data.durationMinutes >= 1
-              && request.resource.data.durationMinutes <= 1440))
-          && (!('socialLinks' in request.resource.data)
-            || (request.resource.data.socialLinks is map
-              && validSocialLinks(request.resource.data.socialLinks)))
-        ) || (
-          validBaseRecord()
-          && hasAllowedFields(collectionName)
-          && collectionName == 'schedule'
-          && validString(request.resource.data.programId, 128)
-          && request.resource.data.dayOfWeek is int
-          && request.resource.data.dayOfWeek >= 0
-          && request.resource.data.dayOfWeek <= 6
-          && request.resource.data.startTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
-          && request.resource.data.endTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
-          && validString(request.resource.data.timeZone, 80)
-        ) || (
-          validBaseRecord()
-          && hasAllowedFields(collectionName)
-          && collectionName == 'posts'
-          && validString(request.resource.data.title, 180)
-          && validSlug(request.resource.data.slug)
-          && validString(request.resource.data.excerpt, 500)
-          && validString(request.resource.data.body, 100000)
-          && request.resource.data.categoryIds is list
-          && request.resource.data.categoryIds.size() <= 20
-          && request.resource.data.tagIds is list
-          && request.resource.data.tagIds.size() <= 30
-          && (request.resource.data.heroMediaId == null || request.resource.data.heroMediaId is string)
-          && validString(request.resource.data.authorUid, 128)
-          && (!('authorName' in request.resource.data)
-            || (request.resource.data.authorName is string
-              && request.resource.data.authorName.size() <= 120))
-          && (!('searchTerms' in request.resource.data)
-            || (request.resource.data.searchTerms is list
-              && request.resource.data.searchTerms.size() <= 100))
-          && (!('seoTitle' in request.resource.data)
-            || (request.resource.data.seoTitle is string
-              && request.resource.data.seoTitle.size() <= 180))
-          && (!('seoDescription' in request.resource.data)
-            || (request.resource.data.seoDescription is string
-              && request.resource.data.seoDescription.size() <= 320))
-        ) || (
-          validBaseRecord()
-          && hasAllowedFields(collectionName)
-          && collectionName == 'categories'
-          && validString(request.resource.data.name, 100)
-          && validSlug(request.resource.data.slug)
-          && request.resource.data.description is string
-          && request.resource.data.description.size() <= 500
-          && request.resource.data.sortOrder is int
-          && request.resource.data.sortOrder >= 0
-        ) || (
-          validBaseRecord()
-          && hasAllowedFields(collectionName)
-          && collectionName == 'tags'
-          && validString(request.resource.data.name, 60)
-          && validSlug(request.resource.data.slug)
-        ) || (
-          validBaseRecord()
-          && hasAllowedFields(collectionName)
-          && collectionName == 'media'
-          && validString(request.resource.data.originalName, 180)
-          && request.resource.data.storagePath.matches('^media/[A-Za-z0-9._-]+$')
-          && request.resource.data.contentType in [
-            'image/jpeg', 'image/png', 'image/webp', 'image/avif',
-            'audio/mpeg', 'audio/aac', 'audio/ogg', 'audio/wav', 'video/mp4'
-          ]
-          && request.resource.data.sizeBytes is int
-          && request.resource.data.sizeBytes > 0
-          && request.resource.data.sizeBytes <= 52428800
-          && request.resource.data.altText is string
-          && request.resource.data.altText.size() <= 500
-          && request.resource.data.visibility in ['private', 'public']
-        ) || (
-          validBaseRecord()
-          && hasAllowedFields(collectionName)
-          && collectionName == 'banners'
-          && validString(request.resource.data.label, 120)
-          && request.resource.data.placement in ['home-top', 'home-feed', 'news', 'programs', 'footer']
-          && validString(request.resource.data.mediaId, 128)
-          && (!('altText' in request.resource.data)
-            || (request.resource.data.altText is string
-              && request.resource.data.altText.size() <= 500))
-          && (!('sortOrder' in request.resource.data)
-            || (request.resource.data.sortOrder is int
-              && request.resource.data.sortOrder >= 0
-              && request.resource.data.sortOrder <= 10000))
-          && (request.resource.data.targetUrl == null
-            || (request.resource.data.targetUrl is string
-              && request.resource.data.targetUrl.matches('^https://[^ ]+$')))
-          && (request.resource.data.startsAt == null || request.resource.data.startsAt is timestamp)
-          && (request.resource.data.endsAt == null || request.resource.data.endsAt is timestamp)
-          && (request.resource.data.startsAt == null
-            || request.resource.data.endsAt == null
-            || request.resource.data.startsAt < request.resource.data.endsAt)
+          collectionName == 'programs' ? validProgramRecord()
+          : collectionName == 'schedule' ? validScheduleRecord()
+          : collectionName == 'posts' ? validPostRecord()
+          : collectionName == 'categories' ? validCategoryRecord()
+          : collectionName == 'tags' ? validTagRecord()
+          : collectionName == 'media' ? validMediaRecord()
+          : collectionName == 'banners' ? validBannerRecord()
+          : false
         );
     }
 

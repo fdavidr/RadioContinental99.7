@@ -59,6 +59,115 @@ export function createPublicEntries(documents, collectionId, siteUrl) {
   return entries
 }
 
+function getStringField(fields, fieldName) {
+  const value = fields[fieldName]?.stringValue
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function escapeHtml(value) {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;')
+}
+
+function editorialBodyAsText(value) {
+  const text = value
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<br\s*\/?>|<\/(?:p|h[1-6]|li|blockquote|div)>/gi, '\n')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/[ \t]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .trim()
+
+  return text.split(/\n+/).map((line) => line.trim()).filter(Boolean)
+}
+
+function setMetaTag(html, attribute, key, value) {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const attributeMatcher = new RegExp(`\\b${attribute}=["']${escapedKey}["']`, 'i')
+  let updated = false
+  const tag = `<meta ${attribute}="${key}" content="${escapeHtml(value)}" />`
+  const withUpdatedTag = html.replace(/<meta\b[^>]*>/gi, (existingTag) => {
+    if (!attributeMatcher.test(existingTag)) return existingTag
+    updated = true
+    return tag
+  })
+  return updated ? withUpdatedTag : withUpdatedTag.replace('</head>', `  ${tag}\n  </head>`)
+}
+
+export function createPrerenderedHtml(template, document, collectionId, siteUrl, socialImageUrl = '') {
+  const fields = document.fields ?? {}
+  if (
+    fields.status?.stringValue !== 'published'
+    || fields.isArchived?.booleanValue !== false
+  ) return null
+
+  const slug = getStringField(fields, 'slug')
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) return null
+
+  const isPost = collectionId === 'posts'
+  const route = isPost ? 'noticias' : 'programas'
+  const path = `/${route}/${slug}`
+  const canonicalUrl = new URL(path, `${siteUrl}/`).toString()
+  const title = getStringField(fields, isPost ? 'seoTitle' : 'title')
+    || getStringField(fields, 'title')
+    || (isPost ? 'Noticia' : 'Programa')
+  const description = getStringField(fields, isPost ? 'seoDescription' : 'description')
+    || getStringField(fields, isPost ? 'excerpt' : 'description')
+  const bodyLines = isPost ? editorialBodyAsText(getStringField(fields, 'body')) : []
+  const author = getStringField(fields, 'authorName') || 'Radio 99.7 FM'
+  const publishedAt = fields.publishedAt?.timestampValue ?? ''
+  const visibleContent = isPost
+    ? `<p>${escapeHtml(getStringField(fields, 'excerpt'))}</p>${bodyLines.map((line) => `<p>${escapeHtml(line)}</p>`).join('')}`
+    : `<p>${escapeHtml(getStringField(fields, 'description'))}</p><p>Conduce: ${escapeHtml((fields.hostNames?.arrayValue?.values ?? []).map((value) => value.stringValue ?? '').filter(Boolean).join(', ') || 'Radio 99.7 FM')}</p>`
+
+  let html = template.replace(/<title>[\s\S]*?<\/title>/i, `<title>${escapeHtml(`${title} | Radio 99.7 FM`)}</title>`)
+  html = html.replace(/<link\b[^>]*rel=["']canonical["'][^>]*>/i, `<link rel="canonical" href="${escapeHtml(canonicalUrl)}" />`)
+  html = setMetaTag(html, 'name', 'description', description)
+  html = setMetaTag(html, 'name', 'robots', 'index, follow')
+  html = setMetaTag(html, 'property', 'og:type', isPost ? 'article' : 'website')
+  html = setMetaTag(html, 'property', 'og:title', title)
+  html = setMetaTag(html, 'property', 'og:description', description)
+  html = setMetaTag(html, 'property', 'og:url', canonicalUrl)
+  html = setMetaTag(html, 'name', 'twitter:title', title)
+  html = setMetaTag(html, 'name', 'twitter:description', description)
+  if (socialImageUrl) {
+    html = setMetaTag(html, 'property', 'og:image', socialImageUrl)
+    html = setMetaTag(html, 'name', 'twitter:image', socialImageUrl)
+    html = setMetaTag(html, 'name', 'twitter:card', 'summary_large_image')
+  }
+  if (isPost) {
+    html = setMetaTag(html, 'property', 'article:author', author)
+    if (publishedAt) html = setMetaTag(html, 'property', 'article:published_time', publishedAt)
+  }
+
+  const content = `<main class="page-shell"><article class="container article-container"><h1>${escapeHtml(getStringField(fields, 'title') || title)}</h1>${visibleContent}</article></main>`
+  const rootPattern = /<div id="root">\s*<\/div>/i
+  if (!rootPattern.test(html)) throw new Error('No se encontró el contenedor React para generar una página prerenderizada.')
+  return html.replace(rootPattern, `<div id="root">${content}</div>`)
+}
+
+async function writePrerenderedPages({ documents, collectionId, siteUrl, outputDirectory, socialImageUrl }) {
+  const template = await readFile(resolve(outputDirectory, 'index.html'), 'utf8')
+  const route = collectionId === 'posts' ? 'noticias' : 'programas'
+  let generated = 0
+  for (const document of documents) {
+    const html = createPrerenderedHtml(template, document, collectionId, siteUrl, socialImageUrl)
+    if (!html) continue
+    const slug = getStringField(document.fields ?? {}, 'slug')
+    const pageDirectory = resolve(outputDirectory, route, slug)
+    await mkdir(pageDirectory, { recursive: true })
+    await writeFile(resolve(pageDirectory, 'index.html'), html, 'utf8')
+    generated += 1
+  }
+  return generated
+}
+
 export async function fetchPublishedDocuments({ endpoint, collectionId, fetchImpl = fetch }) {
   const documents = []
   let cursor
@@ -130,12 +239,17 @@ export async function generateSitemap({
   outputDirectory = resolve(root, 'dist'),
   fetchImpl = fetch,
   logger = console,
+  requireEditorialPrerender = false,
+  socialImageUrl = '',
 }) {
   assertSiteOrigin(siteUrl)
   const entries = new Map(staticPaths.map((path) => [new URL(path, `${siteUrl}/`).toString(), null]))
+  const failures = []
 
   if (!projectId) {
-    logger.warn('VITE_FIREBASE_PROJECT_ID no está configurado; se generará el sitemap con rutas estáticas.')
+    const message = 'VITE_FIREBASE_PROJECT_ID no está configurado; se generará el sitemap con rutas estáticas.'
+    logger.warn(message)
+    if (requireEditorialPrerender) failures.push(message)
   } else {
     const endpointPath = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/(default)/documents:runQuery`
     const endpoint = apiKey ? `${endpointPath}?key=${encodeURIComponent(apiKey)}` : endpointPath
@@ -146,9 +260,18 @@ export async function generateSitemap({
         for (const [url, lastmod] of createPublicEntries(documents, collectionId, siteUrl)) {
           entries.set(url, lastmod)
         }
+        const generated = await writePrerenderedPages({
+          documents,
+          collectionId,
+          siteUrl,
+          outputDirectory,
+          socialImageUrl,
+        })
+        logger.log(`Páginas prerenderizadas para ${collectionId}: ${generated}.`)
       } catch (error) {
+        failures.push(`${collectionId}: ${error.message}`)
         logger.warn(
-          `No se pudieron incluir documentos públicos de ${collectionId} en el sitemap; ` +
+          `No se pudieron prerenderizar documentos públicos de ${collectionId}; ` +
           `se conservarán las rutas estáticas y las demás colecciones. Motivo: ${error.message}`,
         )
       }
@@ -169,6 +292,9 @@ export async function generateSitemap({
   robots = robots.replace(/^Sitemap:.*(?:\r?\n)?/gim, '')
   await writeFile(robotsPath, `${robots.trimEnd()}\nSitemap: ${siteUrl}/sitemap.xml\n`, 'utf8')
   logger.log(`Sitemap generado con ${entries.size} URLs públicas para ${siteUrl}.`)
+  if (requireEditorialPrerender && failures.length) {
+    throw new Error(`No se puede publicar sin completar el prerender editorial: ${failures.join('; ')}`)
+  }
   return entries
 }
 
@@ -183,6 +309,8 @@ async function main() {
     siteUrl,
     projectId: process.env.VITE_FIREBASE_PROJECT_ID?.trim(),
     apiKey: process.env.VITE_FIREBASE_API_KEY?.trim(),
+    socialImageUrl: process.env.VITE_SOCIAL_PREVIEW_IMAGE_URL?.trim(),
+    requireEditorialPrerender: process.argv.includes('--require-editorial-prerender'),
   })
 }
 

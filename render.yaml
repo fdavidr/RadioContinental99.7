@@ -9,13 +9,7 @@ services:
         source: /noticias
         destination: /index.html
       - type: rewrite
-        source: /noticias/*
-        destination: /index.html
-      - type: rewrite
         source: /programas
-        destination: /index.html
-      - type: rewrite
-        source: /programas/*
         destination: /index.html
       - type: rewrite
         source: /programacion

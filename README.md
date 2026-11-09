@@ -16,15 +16,15 @@ El contenido ilustrativo no es guardado automáticamente en Firebase. No hay mig
 
 ## Despliegue en Render
 
-El frontend debe ejecutarse como **Static Site**, no como Web Service. La configuración de referencia está en [`render.yaml`](./render.yaml): publica `dist`, instala dependencias de desarrollo para TypeScript/Vite y ejecuta `npm run deploy:prepare`. Ese manifiesto contiene rewrites de las rutas SPA existentes y no incluye una regla global para la raíz o rutas ajenas a esos módulos. Los rewrites con comodín de `/noticias/*`, `/programas/*` y `/admin/*` sí entregan `index.html` para cualquier subruta de esos módulos; un slug inexistente puede por ello recibir HTTP 200 y ser un soft 404 de React. El hosting estático no puede validar slugs dinámicos de Firestore al resolver el status HTTP; evitarlo requeriría prerenderizado/SSR o una capa de servidor.
+El frontend debe ejecutarse como **Static Site**, no como Web Service. La configuración de referencia está en [`render.yaml`](./render.yaml): publica `dist`, instala dependencias de desarrollo para TypeScript/Vite y ejecuta `npm run deploy:prepare`. Las rutas de listados y administración se resuelven como SPA. Durante el build se consultan únicamente `posts` y `programs` públicos, y se generan archivos prerenderizados `dist/noticias/<slug>/index.html` y `dist/programas/<slug>/index.html`; se quitaron los rewrites wildcard para noticias/programas. Los slugs existentes sirven sus archivos y los slugs inexistentes deben recibir HTTP 404. El panel conserva el Rewrite `/admin/*`.
 
 Si el Static Site actual fue creado desde el Dashboard y no está administrado por un Blueprint, agregar `render.yaml` al repositorio no aplica por sí solo sus reglas. Configurá las mismas reglas Rewrite en **Render Dashboard → Static Site → Redirects/Rewrites**, o vinculá el servicio existente al Blueprint sin crear un servicio duplicado. Aplicá primero en staging si está disponible.
 
-En Render, `VITE_SITE_URL` debe ser exactamente `https://continental997.fm` (sin barra final). `npm run deploy:prepare` rechaza otros orígenes antes de compilar para evitar que canonical, `robots.txt` y sitemap sigan señalando al host `onrender.com`. Las demás variables Firebase deben identificar el proyecto de producción correcto; no guardes credenciales de Admin SDK en Render para esta app estática.
+En Render, `VITE_SITE_URL` debe ser exactamente `https://continental997.fm` (sin barra final). `npm run deploy:prepare` rechaza otros orígenes antes de compilar para evitar que canonical, `robots.txt` y sitemap sigan señalando al host `onrender.com`. Las variables Firebase deben identificar el proyecto de producción correcto. El prerender estricto requiere que ambas consultas públicas de Firestore terminen correctamente; si Firestore devuelve 403 u otro error, el sitemap estático se conserva como respaldo de diagnóstico, pero el build falla para no desplegar páginas editoriales incompletas ni devolver 404 para contenido publicado. No guardes credenciales de Admin SDK en Render para esta app estática.
 
-Después de aplicar la configuración y desplegar, abrir directamente `/noticias`, `/programas`, `/programacion`, `/admin`, `/admin/login` y `/admin/recuperar`. Las rutas SPA deben servir `index.html`; el router de React se ocupa del contenido. Confirmá también que `/robots.txt`, `/sitemap.xml` y el canonical apunten a `https://continental997.fm`. Render no aplica rewrites a archivos estáticos que ya existan en esas rutas.
+Después de aplicar la configuración y desplegar, abrir directamente `/noticias`, `/programas`, `/programacion`, `/admin`, `/admin/login` y `/admin/recuperar`. Las rutas SPA deben servir `index.html`; el router de React se ocupa del contenido. Confirmá que un slug editorial publicado devuelva 200 con canonical de su propia URL y que un slug inexistente de noticias/programas devuelva HTTP 404. Comprobá también `/robots.txt`, `/sitemap.xml` y que el canonical apunte a `https://continental997.fm`. Render sirve los archivos estáticos por slug sin pasar por rewrites wildcard.
 
-El sitemap consulta únicamente `posts` y `programs` con `status == "published"` e `isArchived == false`, que son las condiciones de lectura pública expresadas por las reglas del repositorio. Si Firestore rechaza una colección, el script conserva las rutas estáticas, registra el detalle del error y continúa el build; esto no corrige permisos ni añade contenido editorial. No se deben abrir reglas para escritura pública. Para diagnosticar un `PERMISSION_DENIED`, comparar el proyecto seleccionado y las reglas realmente desplegadas con `firestore.rules`, e inspeccionar los campos reales de los documentos; este repositorio no puede comprobar el estado de la consola Firebase.
+El generador consulta únicamente `posts` y `programs` con `status == "published"` e `isArchived == false`, que son las condiciones de lectura pública expresadas por las reglas del repositorio. El comando `npm run generate:sitemap` puede producir el respaldo estático y registrar fallos de lectura; el comando de producción `npm run deploy:prepare` exige que las dos colecciones se lean correctamente para publicar páginas por slug. Esto no corrige permisos ni añade contenido. No abras reglas de escritura pública. Para diagnosticar un `PERMISSION_DENIED`, comparar el proyecto seleccionado y las reglas realmente desplegadas con `firestore.rules`, e inspeccionar los campos reales de los documentos; este repositorio no puede comprobar el estado de la consola Firebase. Cada publicación o cambio editorial requiere un nuevo deploy para actualizar las páginas estáticas y el sitemap; automatizarlo con un deploy hook queda como mejora posterior.
 
 ## Configuración de Firebase
 
@@ -47,6 +47,22 @@ firebase deploy --only firestore:rules,firestore:indexes,storage
 ```
 
 Los archivos de despliegue son `firebase.json`, `firestore.rules`, `firestore.indexes.json` y `storage.rules`. El repositorio no incluye una cuenta de servicio ni selecciona o despliega un proyecto por sí solo.
+
+### Pruebas locales de reglas Firestore
+
+Las reglas propuestas están en `firestore.rules`; para probarlas sin afectar Firebase de producción, instala Java 21 y Firebase CLI, luego ejecuta:
+
+```sh
+firebase emulators:exec --only firestore --project demo-radio-rules "node --test scripts/firestore-rules.emulator.mjs"
+```
+
+La suite carga esas reglas en Firestore Emulator y crea datos de prueba aislados. Incluye visitantes, editor, superadministrador, cuenta no verificada y usuario sin rol. El Emulator prueba autorización, no la disponibilidad de índices compuestos en producción; esos índices deben verificarse aparte en Firebase Console. Para publicar únicamente las reglas, y solo después de autorización:
+
+```sh
+firebase deploy --only firestore:rules --project radio997-d5380
+```
+
+Revisa el proyecto seleccionado y el diff de reglas antes de confirmar cualquier publicación. No uses `allow read, write: if true` ni sustituyas estas reglas por una política global.
 
 ## Authentication y roles
 
