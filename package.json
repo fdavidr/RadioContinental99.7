@@ -9,6 +9,7 @@
     "typecheck": "tsc -b --pretty false",
     "lint": "oxlint",
     "test": "node --test",
+    "admin:roles": "node scripts/admin-roles.mjs",
     "generate:sitemap": "node scripts/generate-sitemap.mjs",
     "deploy:prepare": "node scripts/check-production-config.mjs && npm run build && node scripts/generate-sitemap.mjs --require-editorial-prerender",
     "preview": "vite preview"
@@ -26,11 +27,13 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "4.7.0",
+    "firebase-admin": "^13.10.0",
     "oxlint": "^1.88.0",
     "typescript": "~7.0.2",
     "vite": "6.4.5"
   },
   "overrides": {
-    "@grpc/grpc-js": "1.14.7"
+    "@grpc/grpc-js": "1.14.7",
+    "uuid": "11.1.1"
   }
 }

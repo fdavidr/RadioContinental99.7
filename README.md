@@ -95,9 +95,30 @@ En Firebase Console, antes de usar estos flujos:
 
 1. Un operador autorizado crea la cuenta inicial en Firebase Console (Authentication > Users); no existe un formulario de alta en el sitio.
 2. El titular inicia sesión y verifica su correo desde el enlace enviado por Firebase. No conceder claims antes de verificar la identidad y controlar el acceso a la cuenta.
-3. Un operador con acceso privilegiado ejecuta, desde una estación/entorno seguro con Firebase Admin SDK y Application Default Credentials, una operación administrativa puntual `setCustomUserClaims(uid, { superadmin: true })`. Obtener el UID de la consola; no codificar UID, email o contraseña en el cliente ni guardar credenciales de servicio en el repositorio. La asignación debe ser una acción auditada y de acceso restringido.
-4. El titular vuelve a iniciar sesión o renueva su token para recibir el claim; verificar acceso permitido al superadmin y denegado a un editor.
-5. Proteger y rotar el acceso privilegiado. No habilitar una ruta pública de bootstrap ni exponer Admin SDK al bundle de Vite.
+3. Un operador autorizado, desde Cloud Shell o una estación segura con Firebase Admin SDK y Application Default Credentials (ADC), consulta UID/correo y claims actuales. La herramienta local `scripts/admin-roles.mjs` solo apunta a `radio997-d5380`, nunca crea usuarios y no es parte del bundle:
+
+```powershell
+# Solo si el entorno seguro aún no tiene ADC configuradas:
+gcloud auth application-default login
+
+# Consultar por correo o UID:
+npm run admin:roles -- show --project radio997-d5380 --email operador@ejemplo.com
+npm run admin:roles -- show --project radio997-d5380 --uid UID_CONFIRMADO
+
+# Asignar; exige que UID, correo aprobado y emailVerified coincidan,
+# y luego pide escribir una frase de confirmación exacta:
+npm run admin:roles -- assign --project radio997-d5380 --uid UID_CONFIRMADO --email operador@ejemplo.com --role superadmin
+npm run admin:roles -- assign --project radio997-d5380 --uid UID_CONFIRMADO --email operador@ejemplo.com --role editor
+
+# Revocar un rol específico o ambos roles de la aplicación:
+npm run admin:roles -- revoke --project radio997-d5380 --uid UID_CONFIRMADO --role editor
+npm run admin:roles -- revoke --project radio997-d5380 --uid UID_CONFIRMADO --role all
+```
+
+La herramienta exige proyecto literal `radio997-d5380`, usa ADC, rechaza variables de proyecto contradictorias y `FIREBASE_AUTH_EMULATOR_HOST`, y requiere terminal interactiva para modificar claims. Para asignar un rol exige UID, correo aprobado coincidente, cuenta habilitada y correo verificado. Antes de escribir, muestra los roles anterior/resultante y pide confirmación exacta con operación, rol, UID y proyecto; luego vuelve a consultar el usuario y rechaza la operación si cambiaron sus claims o, al asignar, el estado de la cuenta. Las mutaciones también adquieren un bloqueo exclusivo local para serializar procesos de esta herramienta en la misma ubicación de usuario; si queda un bloqueo tras un cierre abrupto, inspecciona el PID/host y confirma que no hay operación activa antes de eliminar manualmente `%LOCALAPPDATA%\RadioContinental99.7\admin-role-operation.lock`. Este bloqueo no coordina otras estaciones ni herramientas externas. `setCustomUserClaims` reemplaza el mapa entero: la herramienta preserva claims adicionales, cambia los roles de aplicación a un solo rol al asignar y permite revocar un rol o todos los roles de la app. Firebase no ofrece comparación-y-escritura atómica para custom claims, por lo que un cambio concurrente desde otro host ocurrido después de la última consulta aún requiere coordinación entre operadores. Cada intento confirmado se registra sin correo, contraseña, token, credenciales ni valores de claims adicionales en `%LOCALAPPDATA%\RadioContinental99.7\admin-role-audit.jsonl` (Windows) o `~/.local/state/RadioContinental99.7/admin-role-audit.jsonl` (otros sistemas); incluye UID objetivo, proyecto, acción, roles anteriores/resultantes, cuenta local y host, pero la cuenta local no prueba por sí sola la identidad de ADC. Ese archivo local no reemplaza los Cloud Audit Logs ni una bitácora central controlada.
+
+4. El titular renueva el token con `AuthContext.refresh()` o cierra e inicia sesión de nuevo; comprobar claim `superadmin` y correo verificado, además de acceso permitido a rutas superadmin y denegado a un editor.
+5. Proteger ADC/IAM, usar permisos mínimos y conservar el respaldo/auditoría administrativa. No habilitar una ruta pública de bootstrap ni exponer Admin SDK o credenciales al bundle de Vite, repositorio o Render. La herramienta solo cambia custom claims: no crea cuentas, no cambia reglas y no concede por sí misma acceso a Firestore si las reglas lo niegan.
 
 No ejecutar `setCustomUserClaims` desde código cliente o un endpoint público sin una autorización privilegiada independiente. Si ya hay usuarios con el antiguo claim `admin`, revisar cada UID y migrar manualmente a `superadmin` desde el entorno confiable; las reglas nuevas no aceptan `admin`.
 
