@@ -5,17 +5,35 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function validActiveAccessMarker(markerPath) {
+      let marker = get(markerPath).data;
+      return marker.keys().hasOnly(['suspended', 'updatedAt'])
+        && marker.keys().hasAll(['suspended', 'updatedAt'])
+        && marker.suspended is bool
+        && marker.suspended == false
+        && marker.updatedAt is timestamp;
+    }
+
+    function isNotSuspended() {
+      let accessPath = /databases/$(database)/documents/adminAccess/$(request.auth.uid);
+      return !exists(accessPath) || validActiveAccessMarker(accessPath);
+    }
+
     function isSuperadmin() {
       return signedIn()
-        && request.auth.token.email_verified == true
-        && request.auth.token.superadmin == true;
+        ? request.auth.token.get('email_verified', false) == true
+          && request.auth.token.get('superadmin', false) == true
+          && isNotSuspended()
+        : false;
     }
 
     function isEditor() {
       return isSuperadmin()
         || (signedIn()
-          && request.auth.token.email_verified == true
-          && request.auth.token.editor == true);
+          ? request.auth.token.get('email_verified', false) == true
+            && request.auth.token.get('editor', false) == true
+            && isNotSuspended()
+          : false);
     }
 
     function validString(value, maxLength) {
@@ -256,12 +274,77 @@ service cloud.firestore {
         || (!(collectionName in ['media', 'banners']) && isEditor());
     }
 
+    function validExistingAdminLogTarget(action, collectionName, targetPath, target) {
+      let previous = get(targetPath).data;
+      let changedFields = target.diff(previous).affectedKeys();
+      return exists(targetPath)
+        && target.updatedBy == request.auth.uid
+        && target.updatedAt == request.time
+        && (
+          action == 'publish'
+          ? previous.status != 'published' && target.status == 'published'
+          : action == 'archive'
+          ? previous.isArchived == false && target.status == 'archived' && target.isArchived == true
+          : action == 'visibility-change'
+          ? collectionName == 'media' && previous.visibility != target.visibility
+          : action == 'update'
+          ? changedFields.hasAny([
+            'title', 'slug', 'description', 'categoryId', 'hostNames', 'imageMediaId',
+            'durationMinutes', 'socialLinks', 'searchTerms', 'programId', 'dayOfWeek',
+            'startTime', 'endTime', 'timeZone', 'excerpt', 'body', 'categoryIds',
+            'tagIds', 'heroMediaId', 'authorUid', 'authorName', 'seoTitle',
+            'seoDescription', 'name', 'sortOrder', 'originalName', 'storagePath',
+            'contentType', 'sizeBytes', 'altText', 'visibility', 'label', 'placement',
+            'mediaId', 'targetUrl', 'startsAt', 'endsAt', 'status'
+          ])
+            && !(previous.status != 'published' && target.status == 'published')
+            && !(previous.isArchived == false && target.isArchived == true)
+            && !(collectionName == 'media' && previous.visibility != target.visibility)
+          : false
+        );
+    }
+
+    function validAdminLogTarget() {
+      let collectionName = request.resource.data.collection;
+      let targetPath = /databases/$(database)/documents/$(collectionName)/$(request.resource.data.documentId);
+      let target = getAfter(targetPath).data;
+      return existsAfter(targetPath)
+        && (
+          collectionName == 'publicConfig'
+          ? request.resource.data.action == 'update'
+            && request.resource.data.documentId == 'site'
+            && target.updatedAt == request.time
+            && (
+              !exists(targetPath)
+              || target.diff(get(targetPath).data).affectedKeys().hasAny([
+                'stationName', 'slogan', 'streamUrl', 'stationTimeZone', 'contactEmail',
+                'contactPhone', 'whatsappUrl', 'socialLinks'
+              ])
+            )
+          : request.resource.data.action == 'create'
+          ? !exists(targetPath)
+            && target.createdBy == request.auth.uid
+            && target.createdAt == request.time
+            && target.updatedBy == request.auth.uid
+            && target.updatedAt == request.time
+          : validExistingAdminLogTarget(
+            request.resource.data.action,
+            collectionName,
+            targetPath,
+            target
+          )
+        );
+    }
+
     match /publicConfig/{documentId} {
       allow read: if documentId == 'site'
-        && resource.data.keys().hasOnly([
-          'stationName', 'slogan', 'streamUrl', 'stationTimeZone', 'contactEmail', 'contactPhone',
-          'whatsappUrl', 'socialLinks', 'updatedAt'
-        ]);
+        && (
+          !exists(/databases/$(database)/documents/publicConfig/site)
+          || resource.data.keys().hasOnly([
+            'stationName', 'slogan', 'streamUrl', 'stationTimeZone', 'contactEmail', 'contactPhone',
+            'whatsappUrl', 'socialLinks', 'updatedAt'
+          ])
+        );
       allow create, update: if isSuperadmin()
         && documentId == 'site'
         && request.resource.data.keys().hasOnly([
@@ -299,6 +382,10 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    match /adminAccess/{userId} {
+      allow read, write: if false;
+    }
+
     match /privateConfig/{documentId} {
       allow read: if isSuperadmin();
       allow write: if false;
@@ -317,7 +404,11 @@ service cloud.firestore {
         && validString(request.resource.data.collection, 80)
         && validString(request.resource.data.documentId, 128)
         && request.resource.data.createdAt == request.time
-        && validString(request.resource.data.summary, 240);
+        && validString(request.resource.data.summary, 240)
+        && request.resource.data.collection in [
+          'publicConfig', 'posts', 'programs', 'schedule', 'categories', 'tags', 'media', 'banners'
+        ]
+        && validAdminLogTarget();
       allow update, delete: if false;
     }
 
@@ -325,13 +416,14 @@ service cloud.firestore {
       allow read: if isEditorialCollection(collectionName)
         && (
           (collectionName in ['media', 'banners']
-            && (isSuperadmin()
-              || (isPublicRecord()
-                && (collectionName != 'media' || resource.data.visibility == 'public'))))
+            && ((isPublicRecord()
+                && (collectionName != 'media' || resource.data.visibility == 'public'))
+              || isSuperadmin()))
           || (!(collectionName in ['media', 'banners'])
-            && (isEditor() || isPublicRecord()))
+            && (isPublicRecord() || isEditor()))
         );
       allow create: if isEditorialCollection(collectionName)
+        && collectionName != 'media'
         && canEditCollection(collectionName)
         && isEditor()
         && validRecord(collectionName)
@@ -340,6 +432,7 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
       allow update: if isEditorialCollection(collectionName)
+        && collectionName != 'media'
         && canEditCollection(collectionName)
         && validRecord(collectionName)
         && request.resource.data.createdBy == resource.data.createdBy

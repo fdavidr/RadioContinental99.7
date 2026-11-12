@@ -56,7 +56,13 @@ Las reglas propuestas están en `firestore.rules`; para probarlas sin afectar Fi
 firebase emulators:exec --only firestore --project demo-radio-rules "node --test scripts/firestore-rules.emulator.mjs"
 ```
 
-La suite carga esas reglas en Firestore Emulator y crea datos de prueba aislados. Incluye visitantes, editor, superadministrador, cuenta no verificada y usuario sin rol. El Emulator prueba autorización, no la disponibilidad de índices compuestos en producción; esos índices deben verificarse aparte en Firebase Console. Para publicar únicamente las reglas, y solo después de autorización:
+Las pruebas aisladas de Firestore y Storage se ejecutan sin acceder a producción:
+
+```sh
+firebase emulators:exec --only firestore,storage --project demo-radio-rules "node --test scripts/firestore-rules.emulator.mjs scripts/storage-rules.emulator.mjs"
+```
+
+La suite cubre visitantes, editor, superadministrador, cuenta no verificada/suspendida, escalamiento, reactivación y límites de Storage. El Emulator prueba autorización, no la disponibilidad de índices compuestos en producción; esos índices deben verificarse aparte en Firebase Console. Para publicar únicamente las reglas, y solo después de autorización:
 
 ```sh
 firebase deploy --only firestore:rules --project radio997-d5380
@@ -86,9 +92,9 @@ Las reglas también exigen `email_verified: true`. Los perfiles `users/{uid}` no
 En Firebase Console, antes de usar estos flujos:
 
 1. Habilitar Email/Password en Authentication, activar **Email enumeration protection** y configurar una política de contraseña acorde al mínimo de 10 caracteres al que valida la pantalla.
-2. Añadir a **Authorized domains** el dominio de desarrollo y cada dominio real de producción.
+2. En **Authentication → Settings → Authorized domains**, añadir `continental997.fm` (solo el hostname, sin `https://`, ruta ni barra final). Añadir también cualquier hostname alternativo que se vaya a usar como dominio de continuación; no es necesario autorizar rutas individuales. El dominio del sitio debe estar autorizado aunque la app use el handler web estándar de Firebase.
 3. Configurar y traducir las plantillas de restablecimiento y verificación. Para usar las pantallas propias, configurar el handler de acción de restablecimiento como `/admin/restablecer` y el de verificación como `/admin/verificar-correo`; el handler debe conservar `mode`, `oobCode` y los parámetros que Firebase incluya. Si se deja el handler web estándar, Firebase procesa la acción en su propia página y no envía el código a las pantallas de la app.
-4. El `continueUrl` se fija en `/admin/login`; los handlers personalizados reciben el código en sus URLs de acción. Usar HTTPS en producción y mantener el dominio autorizado.
+4. El `continueUrl` se construye como `/admin/login` sobre `VITE_SITE_URL` si está configurado; solo en desarrollo sin esa variable usa el origen actual del navegador. En producción, con `VITE_SITE_URL=https://continental997.fm`, la URL completa es `https://continental997.fm/admin/login`. Este dominio debe figurar en **Authorized domains**. `handleCodeInApp: false` es intencional para el flujo web: Firebase procesa el código en el handler web y luego puede volver a la URL de continuación. No se requiere `handleCodeInApp: true` para una aplicación web sin app móvil. `ActionCodeSettings`/`continueUrl` es opcional en Firebase; omitirlo evita validar un dominio de continuación, pero también elimina el retorno explícito a la aplicación. Mantenerlo para este flujo y autorizar el hostname correcto.
 5. Hacer las pruebas con Authentication Emulator o un proyecto Firebase de staging antes de activar la integración en producción.
 
 ### Procedimiento para el primer superadministrador
@@ -116,6 +122,22 @@ npm run admin:roles -- revoke --project radio997-d5380 --uid UID_CONFIRMADO --ro
 ```
 
 La herramienta exige proyecto literal `radio997-d5380`, usa ADC, rechaza variables de proyecto contradictorias y `FIREBASE_AUTH_EMULATOR_HOST`, y requiere terminal interactiva para modificar claims. Para asignar un rol exige UID, correo aprobado coincidente, cuenta habilitada y correo verificado. Antes de escribir, muestra los roles anterior/resultante y pide confirmación exacta con operación, rol, UID y proyecto; luego vuelve a consultar el usuario y rechaza la operación si cambiaron sus claims o, al asignar, el estado de la cuenta. Las mutaciones también adquieren un bloqueo exclusivo local para serializar procesos de esta herramienta en la misma ubicación de usuario; si queda un bloqueo tras un cierre abrupto, inspecciona el PID/host y confirma que no hay operación activa antes de eliminar manualmente `%LOCALAPPDATA%\RadioContinental99.7\admin-role-operation.lock`. Este bloqueo no coordina otras estaciones ni herramientas externas. `setCustomUserClaims` reemplaza el mapa entero: la herramienta preserva claims adicionales, cambia los roles de aplicación a un solo rol al asignar y permite revocar un rol o todos los roles de la app. Firebase no ofrece comparación-y-escritura atómica para custom claims, por lo que un cambio concurrente desde otro host ocurrido después de la última consulta aún requiere coordinación entre operadores. Cada intento confirmado se registra sin correo, contraseña, token, credenciales ni valores de claims adicionales en `%LOCALAPPDATA%\RadioContinental99.7\admin-role-audit.jsonl` (Windows) o `~/.local/state/RadioContinental99.7/admin-role-audit.jsonl` (otros sistemas); incluye UID objetivo, proyecto, acción, roles anteriores/resultantes, cuenta local y host, pero la cuenta local no prueba por sí sola la identidad de ADC. Ese archivo local no reemplaza los Cloud Audit Logs ni una bitácora central controlada.
+
+### Suspensión de acceso administrativo
+
+Las reglas de Firestore consultan `adminAccess/{uid}` antes de autorizar operaciones editoriales o superadmin. El documento solo admite el esquema `suspended: boolean` y `updatedAt: timestamp`; los clientes no pueden leerlo ni modificarlo. Su ausencia significa acceso activo durante la migración para no bloquear cuentas existentes sin marcador. Un documento presente malformado o un error de evaluación no se interpreta como activo: la operación protegida se deniega.
+
+La herramienta privilegiada solo escribe ese marcador; no modifica usuarios de Authentication ni custom claims:
+
+```powershell
+node scripts/admin-access.mjs show --project radio997-d5380 --uid UID_CONFIRMADO
+node scripts/admin-access.mjs suspend --project radio997-d5380 --uid UID_CONFIRMADO --email operador@ejemplo.com
+node scripts/admin-access.mjs reactivate --project radio997-d5380 --uid UID_CONFIRMADO --email operador@ejemplo.com
+```
+
+Las operaciones mutables requieren ADC, UID y correo coincidentes, proyecto literal y confirmación exacta; cada intento se registra en un JSONL local. `reactivate` solo cambia el marcador de Firestore: no vuelve a habilitar por sí mismo una cuenta deshabilitada en Authentication. Las reglas hacen una comprobación adicional de documento en solicitudes administrativas; esto puede causar lecturas facturables y consume el presupuesto de accesos a documentos de Rules. Supervisar coste y límites con el uso real, especialmente en listados.
+
+**Límite importante:** Storage Rules no consultan este marcador de Firestore en el diseño actual. Una sesión suspendida puede conservar acceso a Storage que permita su ID token hasta que Firebase renueve/expire ese token. La suspensión bloquea inmediatamente las operaciones protegidas de Firestore una vez que el marcador está escrito y la regla activa; para revocación inmediata de Storage se necesitaría una arquitectura adicional o esperar la expiración/renovación del token. No afirmar que este marcador suspende sesiones de Storage de inmediato.
 
 4. El titular renueva el token con `AuthContext.refresh()` o cierra e inicia sesión de nuevo; comprobar claim `superadmin` y correo verificado, además de acceso permitido a rutas superadmin y denegado a un editor.
 5. Proteger ADC/IAM, usar permisos mínimos y conservar el respaldo/auditoría administrativa. No habilitar una ruta pública de bootstrap ni exponer Admin SDK o credenciales al bundle de Vite, repositorio o Render. La herramienta solo cambia custom claims: no crea cuentas, no cambia reglas y no concede por sí misma acceso a Firestore si las reglas lo niegan.

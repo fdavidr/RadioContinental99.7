@@ -12,6 +12,12 @@ const firebaseMessages: Record<string, string> = {
   'unauthenticated': 'Iniciá sesión para continuar.',
   'storage/unauthorized': 'Firebase Storage denegó el acceso a este archivo.',
   'storage/canceled': 'La carga del archivo fue cancelada.',
+  'storage/object-not-found': 'No se encontró el archivo en Storage.',
+  'storage/object-already-exists': 'Ya existe un archivo en esa ruta; no se sobrescribió.',
+  'storage/retry-limit-exceeded': 'Storage agotó los reintentos de red. Podés recuperar la operación con el mismo identificador.',
+  'storage/quota-exceeded': 'Se alcanzó la cuota disponible de Storage.',
+  'functions/deadline-exceeded': 'El servidor tardó demasiado en confirmar la operación. Reintentá con el mismo identificador.',
+  'functions/unavailable': 'El servicio multimedia no está disponible temporalmente. Reintentá más tarde.',
 }
 
 export function toFirebaseServiceError(error: unknown, operation: string): Error {

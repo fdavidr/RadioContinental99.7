@@ -23,6 +23,7 @@ import type {
   CreateRecord,
   EditorialCollection,
   EditorialRecordMap,
+  MediaRecord,
   PrivateUserProfile,
   PublicationStatus,
   PublicSiteConfig,
@@ -430,8 +431,11 @@ export async function createRecord<K extends EditorialCollection>(
   collectionName: K,
   input: CreateRecord<EditorialRecordMap[K]>,
 ): Promise<string> {
+  if (collectionName === 'media') {
+    throw new Error('Los medios deben registrarse mediante la verificación segura de Storage.')
+  }
   await assertContentEditor(user)
-  if (collectionName === 'media' || collectionName === 'banners') await assertAdmin(user)
+  if (collectionName === 'banners') await assertAdmin(user)
   const inputData: Record<string, unknown> = { ...input }
   if (collectionName === 'posts' && typeof inputData.body === 'string') {
     inputData.body = sanitizeEditorialHtml(inputData.body)
@@ -835,6 +839,20 @@ export async function updateRecord<K extends EditorialCollection>(
   expectedUpdatedAt?: Timestamp,
 ): Promise<void> {
   if (!recordId.trim()) throw new Error('El identificador del documento es obligatorio.')
+  if (collectionName === 'media') {
+    const mediaChanges = { ...changes } as Partial<MediaRecord>
+    const action = mediaChanges.status === 'published' && mediaChanges.visibility === 'public'
+      ? 'publish'
+      : mediaChanges.status === 'draft' && mediaChanges.visibility === 'private'
+        ? 'unpublish'
+        : null
+    if (action === null || Object.keys(mediaChanges).some((key) => key !== 'status' && key !== 'visibility')) {
+      throw new Error('Los medios solo pueden cambiar de estado mediante una acción multimedia autorizada.')
+    }
+    const { changeMediaState } = await import('./media')
+    await changeMediaState(user, recordId, action, expectedUpdatedAt?.toMillis())
+    return
+  }
   await assertContentEditor(user)
   const cleanChanges: Record<string, unknown> = { ...changes }
   if (collectionName === 'posts' && typeof cleanChanges.body === 'string') {
@@ -844,7 +862,7 @@ export async function updateRecord<K extends EditorialCollection>(
   if (changes.status === 'archived') {
     throw new Error('Usá archiveRecord para archivar un documento.')
   }
-  if (collectionName === 'media' || collectionName === 'banners') await assertAdmin(user)
+  if (collectionName === 'banners') await assertAdmin(user)
 
   try {
     const db = getDatabase()
@@ -866,15 +884,6 @@ export async function updateRecord<K extends EditorialCollection>(
     }
     validateEditorialRecord(collectionName, { ...currentData, ...cleanChanges }, { allowSystemFields: true })
     const targetData = { ...currentData, ...cleanChanges }
-    const targetMediaIsPublic = collectionName === 'media'
-      && targetData.status === 'published'
-      && targetData.isArchived === false
-      && targetData.visibility === 'public'
-    const currentMediaIsPublic = collectionName === 'media'
-      && currentData.status === 'published'
-      && currentData.isArchived === false
-      && currentData.visibility === 'public'
-    const storagePath = collectionName === 'media' ? currentData.storagePath : null
     if (collectionName === 'schedule') {
       const nextRecord = { ...currentData, ...cleanChanges }
       await assertScheduleDoesNotOverlap({
@@ -887,14 +896,6 @@ export async function updateRecord<K extends EditorialCollection>(
         status: String(nextRecord.status) as PublicationStatus,
       }, recordId)
     }
-    if (collectionName === 'media' && typeof storagePath !== 'string') {
-      throw new Error('El documento de medio no contiene una ruta de Storage válida.')
-    }
-
-    if (currentMediaIsPublic && !targetMediaIsPublic) {
-      await import('./media').then(({ setMediaVisibility }) => setMediaVisibility(user, storagePath as string, 'private'))
-    }
-
     await runTransaction(db, async (transaction) => {
       const latest = await transaction.get(recordRef)
       if (!latest.exists()) throw new Error(`No existe el documento "${recordId}" en "${collectionName}".`)
@@ -923,17 +924,6 @@ export async function updateRecord<K extends EditorialCollection>(
         recordId,
       )
     })
-
-    if (targetMediaIsPublic && !currentMediaIsPublic) {
-      try {
-        await import('./media').then(({ setMediaVisibility }) => setMediaVisibility(user, storagePath as string, 'public'))
-      } catch (error) {
-        throw new Error(
-          `El registro de medio quedó publicado en Firestore, pero Storage sigue privado. Revisá y reintentá la publicación del archivo.`,
-          { cause: error },
-        )
-      }
-    }
   } catch (error) {
     throw toFirebaseServiceError(error, `No se pudo actualizar "${recordId}"`)
   }
@@ -946,21 +936,17 @@ export async function archiveRecord<K extends EditorialCollection>(
   expectedUpdatedAt?: Timestamp,
 ): Promise<void> {
   if (!recordId.trim()) throw new Error('El identificador del documento es obligatorio.')
+  if (collectionName === 'media') {
+    const { changeMediaState } = await import('./media')
+    await changeMediaState(user, recordId, 'archive', expectedUpdatedAt?.toMillis())
+    return
+  }
   await assertContentEditor(user)
-  if (collectionName === 'media' || collectionName === 'banners') await assertAdmin(user)
+  if (collectionName === 'banners') await assertAdmin(user)
 
   try {
     const db = getDatabase()
     const recordRef = doc(db, collectionName, recordId)
-
-    if (collectionName === 'media') {
-      const existing = await getDoc(recordRef)
-      const storagePath = existing.data()?.storagePath
-      if (typeof storagePath !== 'string') {
-        throw new Error(`El documento de medio "${recordId}" no contiene una ruta de Storage válida.`)
-      }
-      await import('./media').then(({ setMediaVisibility }) => setMediaVisibility(user, storagePath, 'private'))
-    }
 
     await runTransaction(db, async (transaction) => {
       const existing = await transaction.get(recordRef)

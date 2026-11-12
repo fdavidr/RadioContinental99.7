@@ -1,0 +1,40 @@
+{
+  "projectId": "radio997-d5380",
+  "projectNumber": "527560734998",
+  "databaseId": "(default)",
+  "capturedAt": "2026-11-09T20:59:13-04:00",
+  "readOnly": true,
+  "compositeIndexesCommand": "gcloud firestore indexes composite list --project=radio997-d5380 --database='(default)' --format=json",
+  "compositeIndexes": [],
+  "fieldOverridesCommand": "gcloud firestore indexes fields list --project=radio997-d5380 --database='(default)' --format=json",
+  "fieldConfigurations": [
+    {
+      "name": "projects/radio997-d5380/databases/(default)/collectionGroups/__default__/fields/*",
+      "indexConfig": {
+        "indexes": [
+          {
+            "fields": [
+              { "fieldPath": "*", "order": "ASCENDING" }
+            ],
+            "queryScope": "COLLECTION",
+            "state": "READY"
+          },
+          {
+            "fields": [
+              { "fieldPath": "*", "order": "DESCENDING" }
+            ],
+            "queryScope": "COLLECTION",
+            "state": "READY"
+          },
+          {
+            "fields": [
+              { "fieldPath": "*", "arrayConfig": "CONTAINS" }
+            ],
+            "queryScope": "COLLECTION",
+            "state": "READY"
+          }
+        ]
+      }
+    }
+  ]
+}
