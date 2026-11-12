@@ -3144,3 +3144,43 @@ Tras desplegar las Functions, verificar OPTIONS contra la URL de sesión resumib
 4. En una autorización posterior, publicar Rules/frontend y ejecutar pruebas funcionales productivas con alcance aprobado.
 
 Reversión IAM: eliminar primero los bindings de bucket/proyecto vinculados al rol personalizado, luego borrar esos roles y finalmente deshabilitar/eliminar la cuenta solo cuando no esté adjunta a Functions. Reversión CORS: restaurar la política anterior vacía con `gcloud storage buckets update gs://radio997-d5380.firebasestorage.app --clear-cors --project=radio997-d5380`. Reversión de Functions: detener el despliegue del frontend si aún no se publicó; no volver a la identidad default con `roles/editor`. No se ejecutó ninguno de estos comandos.
+
+## Corrección de transiciones multimedia — cambios locales sin publicar
+
+Se corrigió localmente el orden de cambios de visibilidad y se añadieron pruebas. Esta entrada conserva el historial anterior; no implica que el PR esté aprobado ni que se haya publicado código.
+
+- Las transiciones se serializan en `mediaStateTransitions/{operationId}`, una colección privada no legible desde clientes por las reglas actuales. El documento guarda ID de operación, UID, acción, versión esperada, lease de 90 segundos, fase y resultado. No se añaden campos de transición al documento `media` que las reglas exponen en lecturas públicas.
+- Para publicar, Firestore confirma primero `status=published`; recién entonces Storage puede cambiar a `visibility=public`. Si la escritura de metadata falla o su respuesta es ambigua, el código vuelve a consultar y trata de confirmar privacidad antes de compensar Firestore a borrador. Si no puede confirmar privacidad, conserva el estado ambiguo y devuelve error para recuperación.
+- Para despublicar o archivar, Storage se hace privado antes de la transacción Firestore; un fallo de Firestore no restaura el acceso público. Los cambios de metadata usan `preconditionOpts.ifMetagenerationMatch`, sintaxis verificada en `@google-cloud/storage` 7.22.0 instalada. Los archivos antiguos sin SHA-256 siguen bloqueados para publicación.
+- Las pruebas unitarias ahora verifican el orden Storage/Firestore, fallos de metadata/transacción/compensación, respuesta ambigua, concurrencia publicación-despublicación/archivo, recuperación tras expirar el lease, idempotencia, integridad SHA-256 y privacidad del marcador.
+- Emulator comprueba el ciclo Auth/Functions/Firestore/Storage, los cambios concurrentes, la denegación de lectura cliente del marcador y la lectura pública/denegación de lectura privada.
+
+Validaciones locales de esta intervención:
+
+| Comando | Resultado |
+|---|---|
+| `npm test` | **51/51 aprobadas** |
+| `npm --prefix functions test` | **19/19 aprobadas** |
+| Firebase Emulator (Firestore Rules, Storage Rules, Auth, Functions e integración multimedia) | **26/26 aprobadas** |
+| `npm run typecheck` | **Aprobado** |
+| `npm run build` | **Aprobado** |
+| `npm run lint` | **Código 0**; advertencias preexistentes en frontend, ninguna nueva en `media-state.mjs` |
+| `git diff --check` | **Aprobado** antes de esta actualización documental; repetir después de cerrar el diff |
+
+El PR #1 continúa en borrador y en `eafa968479bbeb86d2d3e9122437b6f604e2e012`; estos cambios todavía no están comprometidos ni respaldados en remoto. No se modificaron reglas, IAM, CORS, UBLA, ACL, Render ni datos productivos; no se desplegaron Functions ni Storage Rules. La clasificación completa de los 32 archivos del PR y la revisión de alcance preceden a cualquier integración o publicación.
+
+## Revisión de alcance del PR #1
+
+Clasificación del diff comprometido `origin/main...HEAD` (32 archivos), inspeccionado antes de integrar:
+
+- **A — Multimedia:** `firebase.json`, `functions/index.mjs`, manifiestos de Functions, `src/lib/firebaseFunctions.ts`, `src/services/media.ts`, `src/pages/admin/AdminMediaPage.tsx` y `src/services/firebaseErrors.ts`.
+- **B — Seguridad multimedia:** `functions/src/media-operations.mjs` y sus pruebas, `scripts/media-functions.emulator.mjs`, `storage.rules` y sus pruebas, las restricciones de escritura directa de medios en `firestore.rules` y sus pruebas, y las rutas protegidas de medios en `src/services/content.ts`.
+- **C — Seguridad administrativa independiente:** `scripts/admin-access.mjs` y sus pruebas; suspensión/reactivación y validación de auditoría en `firestore.rules` y `scripts/firestore-rules.emulator.mjs`; y el pin del proyecto productivo en `package.json` con sus pruebas. Los dos últimos archivos de reglas/pruebas contienen cambios mixtos B/C y requieren conservar solo las partes de media si se separa el alcance.
+- **D — Documentación/respaldo:** `README.md`, este documento y los snapshots de índices/campos/reglas bajo `docs/backups/`. Son evidencia/documentación, no entradas de despliegue; no se deben descartar sin conservar el historial.
+- **E — No necesario para esta integración:** `firestore.indexes.review.json` (no está referenciado por `firebase.json` ni agrega índices respecto de la configuración activa), el cambio de URL de acción de correo en `src/services/auth.ts`, y el cambio de logging del sitemap y su prueba.
+
+La dependencia de Firestore es específica: las reglas impiden que clientes creen o modifiquen documentos `media`; las Cloud Functions con Admin SDK hacen la reserva y escritura confiable. No se requiere desplegar índices nuevos. El resto de políticas de suspensión/adminAccess y el pin de proyecto son independientes del flujo multimedia. La recomendación de revisión es mantener juntos A/B, separar C en un PR de seguridad administrativa y excluir E; conservar D como historial no desplegable.
+
+Observación de seguridad de C: la suspensión se aplica en Firestore Rules, pero la autorización de las Functions y Storage Rules continúa basada en claims. Un usuario suspendido con claims aún vigentes podría seguir llamando las Functions y leyendo Storage conforme a esos claims; la suspensión no debe presentarse como revocación global inmediata. No se amplió ese mecanismo en esta intervención.
+
+El PR queda en borrador mientras se resuelve esta separación y se revisa el cambio local de transición. No se hizo merge. IAM, CORS, Rules productivas, Render, ACL/UBLA y datos de producción siguen sin cambios.

@@ -203,6 +203,12 @@ test('Auth, Storage, Callable Functions, Firestore, retries, transitions, and co
 
   await admin.changeState({ operationId: operation.operationId, action: 'publish' })
   assert.equal((await getDoc(mediaRef)).data().status, 'published')
+  await admin.changeState({ operationId: operation.operationId, action: 'publish' })
+  assert.equal((await adminDb.collection('mediaStateTransitions').doc(operation.operationId).get()).data().outcome, 'completed')
+  await assert.rejects(
+    getDoc(doc(admin.db, 'mediaStateTransitions', operation.operationId)),
+    (error) => errorCode(error).endsWith('permission-denied'),
+  )
   const anonymousStorage = createAnonymousStorage()
   assert.deepEqual(
     new Uint8Array(await getBytes(ref(anonymousStorage, `media/${operation.operationId}`))),
@@ -219,6 +225,44 @@ test('Auth, Storage, Callable Functions, Firestore, retries, transitions, and co
   await admin.changeState({ operationId: operation.operationId, action: 'archive' })
   assert.equal((await getDoc(mediaRef)).data().isArchived, true)
   assert.equal((await adminDb.collection('privateConfig').doc('mediaCapacity').get()).data().activeCount, 0)
+})
+
+test('concurrent publish and visibility-changing actions preserve Firestore and Storage consistency', async () => {
+  const admin = await createUser({ superadmin: true })
+  const anonymousStorage = createAnonymousStorage()
+
+  for (const competingAction of ['unpublish', 'archive']) {
+    const bytes = Buffer.from(`concurrent emulator media ${competingAction}`)
+    const operation = mediaUpload(randomUUID(), bytes)
+    await upload(admin, operation, bytes)
+    await admin.finalize(finalizationData(admin, operation))
+
+    await Promise.allSettled([
+      admin.changeState({ operationId: operation.operationId, action: 'publish' }),
+      admin.changeState({ operationId: operation.operationId, action: competingAction }),
+    ])
+
+    const media = (await adminDb.collection('media').doc(operation.operationId).get()).data()
+    const [storageMetadata] = await adminBucket.file(`media/${operation.operationId}`).getMetadata()
+    const publicVisibility = storageMetadata.metadata?.visibility === 'public'
+    assert.equal(media.visibility === 'public', publicVisibility)
+    assert.equal(media.status === 'published', publicVisibility)
+    if (publicVisibility) {
+      assert.deepEqual(
+        new Uint8Array(await getBytes(ref(anonymousStorage, `media/${operation.operationId}`))),
+        new Uint8Array(bytes),
+      )
+    } else {
+      await assert.rejects(
+        getBytes(ref(anonymousStorage, `media/${operation.operationId}`)),
+        (error) => errorCode(error).endsWith('/unauthorized'),
+      )
+    }
+    if (competingAction === 'archive' && media.status === 'archived') {
+      assert.equal(media.isArchived, true)
+      assert.equal(publicVisibility, false)
+    }
+  }
 })
 
 test('Functions reject unverified, unprivileged, wrong-owner, bad-hash, missing-path, and colliding operations', async () => {

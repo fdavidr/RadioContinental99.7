@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { createMediaStateOperation } from './media-state.mjs'
 
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/avif'])
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -41,7 +42,14 @@ function sameMedia(existing, expected, uid) {
     existing.altText === expected.altText
 }
 
-export function createMediaOperations({ db, bucket, FieldValue, Timestamp, HttpsError }) {
+export function createMediaOperations({
+  db,
+  bucket,
+  FieldValue,
+  Timestamp,
+  HttpsError,
+  now = Date.now,
+}) {
   function validateUploadData(data) {
     if (
       typeof data.originalName !== 'string' || data.originalName.length < 1 || data.originalName.length > 180 ||
@@ -268,176 +276,16 @@ export function createMediaOperations({ db, bucket, FieldValue, Timestamp, Https
     return { mediaId: operationId }
   }
 
-  async function setMediaState(request) {
-    requireSuperadmin(request, HttpsError)
-    const { operationId, action, expectedUpdatedAt } = request.data ?? {}
-    if (typeof operationId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(operationId)) {
-      throw new HttpsError('invalid-argument', 'El identificador del medio no es válido.')
-    }
-    if (!['publish', 'unpublish', 'archive'].includes(action)) {
-      throw new HttpsError('invalid-argument', 'La acción multimedia no es válida.')
-    }
-    if (expectedUpdatedAt !== undefined &&
-      (!Number.isSafeInteger(expectedUpdatedAt) || expectedUpdatedAt < 0)) {
-      throw new HttpsError('invalid-argument', 'La versión del registro no es válida.')
-    }
-
-    const uid = request.auth.uid
-    const mediaRef = db.collection('media').doc(operationId)
-    const countRef = db.collection('privateConfig').doc('mediaCapacity')
-    const mediaSnapshot = await mediaRef.get()
-    if (!mediaSnapshot.exists) {
-      throw new HttpsError('not-found', 'No se encontró el registro multimedia.')
-    }
-    const current = mediaSnapshot.data()
-    const storagePath = current.storagePath
-    if (
-      typeof storagePath !== 'string' ||
-      !/^media\/[A-Za-z0-9._-]+$/.test(storagePath) ||
-      typeof current.createdBy !== 'string'
-    ) {
-      throw new HttpsError('permission-denied', 'El archivo no corresponde al registro multimedia.')
-    }
-    const file = bucket.file(storagePath)
-    let metadata
-    try {
-      ;[metadata] = await file.getMetadata()
-    } catch (error) {
-      if (error.code === 404 || error.code === 'storage/object-not-found') {
-        throw new HttpsError('failed-precondition', 'No se encontró el archivo en Storage.')
-      }
-      throw new HttpsError('unavailable', 'No se pudo verificar el archivo en Storage.')
-    }
-    const custom = metadata.metadata ?? {}
-    const verifiedNewUpload = storagePath === `media/${operationId}` &&
-      custom.uploadId === operationId
-    if (verifiedNewUpload) {
-      await getOwnedObject(operationId, current.createdBy, {
-        contentType: current.contentType,
-        sizeBytes: current.sizeBytes,
-      })
-    } else {
-      if (action === 'publish') {
-        throw new HttpsError(
-          'failed-precondition',
-          'Este archivo anterior no tiene hash verificable. No se puede publicar con seguridad; sí se puede despublicar o archivar.',
-        )
-      }
-      if (
-        metadata.contentType !== current.contentType ||
-        Number(metadata.size) !== current.sizeBytes ||
-        (custom.uploadedBy !== undefined && custom.uploadedBy !== current.createdBy)
-      ) {
-        throw new HttpsError('permission-denied', 'El archivo anterior no coincide con el registro multimedia.')
-      }
-    }
-    const visibility = action === 'publish' ? 'public' : 'private'
-    const next = action === 'archive'
-      ? { status: 'archived', isArchived: true, visibility }
-      : { status: action === 'publish' ? 'published' : 'draft', isArchived: false, visibility }
-    if (
-      current.status === next.status &&
-      current.isArchived === next.isArchived &&
-      current.visibility === visibility &&
-      custom.visibility === visibility
-    ) return { mediaId: operationId, status: next.status, visibility }
-
-    const logAction = action === 'publish' ? 'publish' : action === 'archive' ? 'archive' : 'update'
-    const logRef = db.collection('adminLogs').doc(
-      `media-${operationId}-${action}-${uid}-${expectedUpdatedAt ?? 'current'}`,
-    )
-
-    await file.setMetadata({
-      metadata: { ...custom, visibility },
-    })
-
-    try {
-      await db.runTransaction(async (transaction) => {
-        const [latest, countSnapshot] = await Promise.all([
-          transaction.get(mediaRef),
-          action === 'archive' ? transaction.get(countRef) : Promise.resolve(null),
-        ])
-        if (!latest.exists) throw new HttpsError('not-found', 'No se encontró el registro multimedia.')
-        const latestData = latest.data()
-        if (expectedUpdatedAt !== undefined &&
-          (!(latestData.updatedAt instanceof Timestamp) ||
-            latestData.updatedAt.toMillis() !== expectedUpdatedAt)) {
-          if (
-            latestData.status === next.status &&
-            latestData.isArchived === next.isArchived &&
-            latestData.visibility === visibility
-          ) return
-          throw new HttpsError('aborted', 'El registro cambió. Actualizá la lista e intentá nuevamente.')
-        }
-        if (
-          latestData.status === next.status &&
-          latestData.isArchived === next.isArchived &&
-          latestData.visibility === visibility
-        ) return
-        if (latestData.createdBy !== current.createdBy || latestData.storagePath !== storagePath) {
-          throw new HttpsError('permission-denied', 'El registro ya no corresponde a esta operación.')
-        }
-        let activeCount
-        if (action === 'archive') {
-          if (countSnapshot?.exists) {
-            activeCount = countSnapshot.data()?.activeCount
-            if (!Number.isInteger(activeCount) || activeCount < 1) {
-              throw new HttpsError('failed-precondition', 'El contador multimedia requiere revisión administrativa.')
-            }
-          } else {
-            const activeMedia = await transaction.get(
-              db.collection('media').where('isArchived', '==', false).limit(501),
-            )
-            activeCount = activeMedia.size
-            if (activeCount < 1) {
-              throw new HttpsError('failed-precondition', 'No se pudo validar el contador de medios activos.')
-            }
-          }
-        }
-        transaction.update(mediaRef, {
-          ...next,
-          updatedAt: FieldValue.serverTimestamp(),
-          updatedBy: uid,
-          ...(action === 'publish' ? { publishedAt: FieldValue.serverTimestamp() } : {}),
-        })
-        transaction.set(logRef, {
-          actorUid: uid,
-          action: logAction,
-          collection: 'media',
-          documentId: operationId,
-          createdAt: FieldValue.serverTimestamp(),
-          summary: `${logAction}:media`,
-        })
-        if (action === 'archive') {
-          const nextActiveCount = activeCount - 1
-          if (countSnapshot?.exists) {
-            transaction.update(countRef, {
-              activeCount: nextActiveCount,
-              updatedAt: FieldValue.serverTimestamp(),
-            })
-          } else {
-            transaction.create(countRef, {
-              activeCount: nextActiveCount,
-              updatedAt: FieldValue.serverTimestamp(),
-            })
-          }
-        }
-      })
-    } catch (error) {
-      try {
-        await file.setMetadata({ metadata: { ...custom, visibility: 'private' } })
-      } catch {
-        throw new HttpsError(
-          'internal',
-          'Firestore no confirmó el cambio y Storage no pudo volver a privado. Revisá el estado antes de reintentar.',
-        )
-      }
-      if (error instanceof HttpsError) throw error
-      throw new HttpsError('internal', 'No se pudo actualizar el estado del medio en Firestore.')
-    }
-
-    return { mediaId: operationId, status: next.status, visibility }
-  }
+  const setMediaState = createMediaStateOperation({
+    db,
+    bucket,
+    FieldValue,
+    Timestamp,
+    HttpsError,
+    getOwnedObject,
+    requireSuperadmin,
+    now,
+  })
 
   return { finalizeMediaUpload, setMediaState, getOwnedObject }
 }

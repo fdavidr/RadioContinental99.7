@@ -25,7 +25,34 @@ function createHarness() {
   const documents = new Map()
   const objects = new Map()
   const uploadSessions = []
+  const events = []
   let transactions = Promise.resolve()
+  let timestamp = 100
+  let currentTime = 1_000
+  let nextStorageFailure
+  let nextStorageGate
+  let nextRollbackFailure = false
+  let failNextMediaCommit = false
+
+  function resolveSentinels(value) {
+    if (value?.serverTimestamp) return new TestTimestamp(++timestamp)
+    if (Array.isArray(value)) return value.map(resolveSentinels)
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, resolveSentinels(item)]),
+      )
+    }
+    return value
+  }
+
+  function clone(value) {
+    if (value instanceof TestTimestamp) return new TestTimestamp(value.value)
+    if (Array.isArray(value)) return value.map(clone)
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)]))
+    }
+    return value
+  }
 
   function reference(collectionName, id) {
     const ref = { collectionName, id, key: `${collectionName}/${id}` }
@@ -37,7 +64,7 @@ function createHarness() {
     return {
       exists: value !== undefined,
       size: value === undefined ? 0 : 1,
-      data: () => value && structuredClone(value),
+      data: () => value && clone(value),
       ref,
     }
   }
@@ -89,15 +116,36 @@ function createHarness() {
           },
         }
         const result = await callback(transaction)
+        const mediaWrite = writes.find((write) => write.ref.collectionName === 'media')
+        const rollbackWrite = writes.find((write) =>
+          write.ref.collectionName === 'mediaStateTransitions' &&
+          write.data.outcome === 'rolled-back',
+        )
+        if (rollbackWrite && nextRollbackFailure) {
+          nextRollbackFailure = false
+          throw new Error('injected Firestore compensation failure')
+        }
+        const statusWrite = writes.find((write) =>
+          write.ref.collectionName === 'media' && write.data.status !== undefined,
+        )
+        if (statusWrite && failNextMediaCommit) {
+          failNextMediaCommit = false
+          throw new Error('injected Firestore commit failure')
+        }
         for (const write of writes) {
           if (write.type === 'create' && documents.has(write.ref.key)) {
             throw new Error('ALREADY_EXISTS')
           }
           const previous = documents.get(write.ref.key) ?? {}
-          documents.set(write.ref.key, {
-            ...previous,
-            ...structuredClone(write.data),
-          })
+          const data = clone(write.data)
+          for (const [key, value] of Object.entries(data)) {
+            if (value?.deleteField) delete previous[key]
+            else previous[key] = resolveSentinels(value)
+          }
+          documents.set(write.ref.key, previous)
+        }
+        if (mediaWrite) {
+          events.push(`firestore:${documents.get(mediaWrite.ref.key)?.status ?? 'transition'}`)
         }
         return result
       })
@@ -116,27 +164,56 @@ function createHarness() {
         },
         async getMetadata() {
           if (!object) throw Object.assign(new Error('missing'), { code: 404 })
-          return [structuredClone(object.metadata)]
+          events.push('storage:get-metadata')
+          return [clone(object.metadata)]
         },
         async download() {
           if (!object) throw Object.assign(new Error('missing'), { code: 404 })
           return [Buffer.from(object.bytes)]
         },
-        async setMetadata(changes) {
+        async setMetadata(changes, options) {
           if (!object) throw Object.assign(new Error('missing'), { code: 404 })
-          object.metadata.metadata = structuredClone(changes.metadata)
+          const visibility = changes.metadata.visibility
+          events.push(`storage:${visibility}:${documents.get(`media/${path.split('/').pop()}`)?.status ?? 'unknown'}`)
+          if (nextStorageGate?.visibility === visibility) {
+            const gate = nextStorageGate
+            nextStorageGate = undefined
+            gate.signalEntered()
+            await gate.promise
+          }
+          if (options?.preconditionOpts?.ifMetagenerationMatch !== Number(object.metadata.metageneration)) {
+            throw Object.assign(new Error('metageneration mismatch'), { code: 412 })
+          }
+          const failureMode = nextStorageFailure?.visibility === visibility
+            ? nextStorageFailure
+            : undefined
+          if (failureMode && !failureMode.afterApply) {
+            nextStorageFailure = undefined
+            throw new Error('injected Storage metadata failure')
+          }
+          object.metadata.metadata = clone(changes.metadata)
+          object.metadata.metageneration = String(Number(object.metadata.metageneration) + 1)
+          if (failureMode?.afterApply) {
+            nextStorageFailure = undefined
+            throw new Error('injected ambiguous Storage metadata response')
+          }
+          return [clone(object.metadata)]
         },
       }
     },
   }
 
-  const FieldValue = { serverTimestamp: () => ({ serverTimestamp: true }) }
+  const FieldValue = {
+    serverTimestamp: () => ({ serverTimestamp: true }),
+    delete: () => ({ deleteField: true }),
+  }
   const operations = createMediaOperations({
     db,
     bucket,
     FieldValue,
     Timestamp: TestTimestamp,
     HttpsError: CallableError,
+    now: () => currentTime,
   })
 
   function addUpload({
@@ -155,6 +232,7 @@ function createHarness() {
       metadata: {
         contentType,
         size: String(data.length),
+        metageneration: '1',
         metadata: {
           uploadId: operationId,
           uploadedBy: uid,
@@ -173,7 +251,29 @@ function createHarness() {
     })
   }
 
-  return { db, documents, objects, uploadSessions, operations, addUpload }
+  return {
+    db,
+    documents,
+    objects,
+    uploadSessions,
+    events,
+    operations,
+    addUpload,
+    failStorageVisibility(visibility, { afterApply = false } = {}) {
+      nextStorageFailure = { visibility, afterApply }
+    },
+    failFirestoreMediaCommit() { failNextMediaCommit = true },
+    failFirestoreCompensation() { nextRollbackFailure = true },
+    advanceTime(milliseconds) { currentTime += milliseconds },
+    pauseStorageVisibility(visibility) {
+      let signalEntered
+      let release
+      const entered = new Promise((resolve) => { signalEntered = resolve })
+      const promise = new Promise((resolve) => { release = resolve })
+      nextStorageGate = { visibility, signalEntered, promise }
+      return { entered, release }
+    },
+  }
 }
 
 const operationId = 'c2d30104-f7e6-40fb-a3f6-a29f31c4bfab'
@@ -316,6 +416,8 @@ test('state changes verify ownership and are idempotent after success', async ()
   const media = harness.documents.get(`media/${operationId}`)
   assert.equal(media.status, 'published')
   assert.equal(media.visibility, 'public')
+  assert.equal(media.stateTransition, undefined)
+  assert.equal(media.lastStateTransition, undefined)
   assert.equal(harness.objects.get(`media/${operationId}`).metadata.metadata.visibility, 'public')
   const countAfterPublish = harness.documents.size
 
@@ -324,11 +426,210 @@ test('state changes verify ownership and are idempotent after success', async ()
     data: { operationId, action: 'publish' },
   })
   assert.equal(harness.documents.size, countAfterPublish)
+  harness.events.length = 0
   await harness.operations.setMediaState({
     ...request,
     data: { operationId, action: 'archive' },
   })
+  assert.equal(harness.documents.get(`media/${operationId}`).status, 'archived')
+  assert.equal(harness.objects.get(`media/${operationId}`).metadata.metadata.visibility, 'private')
+  const archivePrivateWrite = harness.events.findIndex((event) => event === 'storage:private:published')
+  const archiveCommit = harness.events.findIndex((event) => event === 'firestore:archived')
+  assert.ok(archiveCommit > archivePrivateWrite)
   assert.equal(harness.documents.get('privateConfig/mediaCapacity').activeCount, 0)
+})
+
+test('Firestore confirms publication before Storage becomes public', async () => {
+  const harness = createHarness()
+  harness.addUpload({ operationId, uid, bytes })
+  await harness.operations.finalizeMediaUpload({ ...request, data: uploadData })
+  harness.events.length = 0
+
+  await harness.operations.setMediaState({
+    ...request,
+    data: { operationId, action: 'publish' },
+  })
+
+  const publicWrite = harness.events.findIndex((event) => event === 'storage:public:published')
+  const publishedCommit = harness.events.findIndex((event) => event === 'firestore:published')
+  assert.ok(publishedCommit >= 0)
+  assert.ok(publicWrite > publishedCommit)
+  assert.equal(harness.objects.get(`media/${operationId}`).metadata.metadata.visibility, 'public')
+})
+
+test('a failed public metadata write compensates Firestore only after confirming Storage is private', async () => {
+  const harness = createHarness()
+  harness.addUpload({ operationId, uid, bytes })
+  await harness.operations.finalizeMediaUpload({ ...request, data: uploadData })
+  harness.failStorageVisibility('public')
+
+  await assert.rejects(
+    harness.operations.setMediaState({ ...request, data: { operationId, action: 'publish' } }),
+    (error) => error.code === 'unavailable' && /volvió a borrador/.test(error.message),
+  )
+
+  assert.equal(harness.documents.get(`media/${operationId}`).status, 'draft')
+  assert.equal(harness.objects.get(`media/${operationId}`).metadata.metadata.visibility, 'private')
+  assert.ok(harness.events.indexOf('firestore:published') < harness.events.lastIndexOf('firestore:draft'))
+
+  await harness.operations.setMediaState({
+    ...request,
+    data: { operationId, action: 'publish' },
+  })
+  assert.equal(harness.documents.get(`media/${operationId}`).status, 'published')
+  assert.equal(harness.objects.get(`media/${operationId}`).metadata.metadata.visibility, 'public')
+})
+
+test('a failed publication transaction leaves the Storage object private', async () => {
+  const harness = createHarness()
+  harness.addUpload({ operationId, uid, bytes })
+  await harness.operations.finalizeMediaUpload({ ...request, data: uploadData })
+  harness.failFirestoreMediaCommit()
+
+  await assert.rejects(
+    harness.operations.setMediaState({ ...request, data: { operationId, action: 'publish' } }),
+    (error) => error.code === 'unavailable' && /Storage quedó privado/.test(error.message),
+  )
+
+  assert.equal(harness.documents.get(`media/${operationId}`).status, 'draft')
+  assert.equal(harness.objects.get(`media/${operationId}`).metadata.metadata.visibility, 'private')
+  assert.equal(harness.events.some((event) => event.startsWith('storage:public:')), false)
+})
+
+test('a failed Firestore compensation leaves the object private and reports an ambiguous state', async () => {
+  const harness = createHarness()
+  harness.addUpload({ operationId, uid, bytes })
+  await harness.operations.finalizeMediaUpload({ ...request, data: uploadData })
+  harness.failStorageVisibility('public')
+  harness.failFirestoreCompensation()
+
+  await assert.rejects(
+    harness.operations.setMediaState({ ...request, data: { operationId, action: 'publish' } }),
+    (error) => error.code === 'unavailable' && /no pudo compensar/.test(error.message),
+  )
+
+  assert.equal(harness.documents.get(`media/${operationId}`).status, 'published')
+  assert.equal(harness.objects.get(`media/${operationId}`).metadata.metadata.visibility, 'private')
+})
+
+test('unpublishing makes Storage private before confirming the Firestore draft', async () => {
+  const harness = createHarness()
+  harness.addUpload({ operationId, uid, bytes })
+  await harness.operations.finalizeMediaUpload({ ...request, data: uploadData })
+  await harness.operations.setMediaState({ ...request, data: { operationId, action: 'publish' } })
+  harness.events.length = 0
+
+  await harness.operations.setMediaState({ ...request, data: { operationId, action: 'unpublish' } })
+
+  const privateWrite = harness.events.findIndex((event) => event === 'storage:private:published')
+  const draftCommit = harness.events.findIndex((event) => event === 'firestore:draft')
+  assert.ok(privateWrite >= 0)
+  assert.ok(draftCommit > privateWrite)
+  assert.equal(harness.documents.get(`media/${operationId}`).status, 'draft')
+  assert.equal(harness.objects.get(`media/${operationId}`).metadata.metadata.visibility, 'private')
+})
+
+test('a Firestore failure during unpublish leaves Storage private and the published record recoverable', async () => {
+  const harness = createHarness()
+  harness.addUpload({ operationId, uid, bytes })
+  await harness.operations.finalizeMediaUpload({ ...request, data: uploadData })
+  await harness.operations.setMediaState({ ...request, data: { operationId, action: 'publish' } })
+  harness.failFirestoreMediaCommit()
+
+  await assert.rejects(
+    harness.operations.setMediaState({ ...request, data: { operationId, action: 'unpublish' } }),
+    (error) => error.code === 'unavailable' && /Storage quedó privado/.test(error.message),
+  )
+
+  assert.equal(harness.documents.get(`media/${operationId}`).status, 'published')
+  assert.equal(harness.objects.get(`media/${operationId}`).metadata.metadata.visibility, 'private')
+})
+
+test('an expired transition lease can recover the same expected Firestore version', async () => {
+  const harness = createHarness()
+  harness.addUpload({ operationId, uid, bytes })
+  await harness.operations.finalizeMediaUpload({ ...request, data: uploadData })
+  const expectedUpdatedAt = harness.documents.get(`media/${operationId}`).updatedAt.toMillis()
+  harness.failFirestoreMediaCommit()
+
+  await assert.rejects(
+    harness.operations.setMediaState({
+      ...request,
+      data: { operationId, action: 'publish', expectedUpdatedAt },
+    }),
+    (error) => error.code === 'unavailable',
+  )
+  assert.equal(harness.documents.get(`mediaStateTransitions/${operationId}`).phase, 'claimed')
+  harness.advanceTime(90_001)
+
+  await harness.operations.setMediaState({
+    ...request,
+    data: { operationId, action: 'publish', expectedUpdatedAt },
+  })
+
+  assert.equal(harness.documents.get(`media/${operationId}`).status, 'published')
+  assert.equal(harness.documents.get(`mediaStateTransitions/${operationId}`).outcome, 'completed')
+  assert.equal(harness.objects.get(`media/${operationId}`).metadata.metadata.visibility, 'public')
+})
+
+test('a Storage timeout after applying public metadata is compensated to private', async () => {
+  const harness = createHarness()
+  harness.addUpload({ operationId, uid, bytes })
+  await harness.operations.finalizeMediaUpload({ ...request, data: uploadData })
+  harness.failStorageVisibility('public', { afterApply: true })
+
+  await assert.rejects(
+    harness.operations.setMediaState({ ...request, data: { operationId, action: 'publish' } }),
+    (error) => error.code === 'unavailable',
+  )
+
+  assert.equal(harness.documents.get(`media/${operationId}`).status, 'draft')
+  assert.equal(harness.objects.get(`media/${operationId}`).metadata.metadata.visibility, 'private')
+})
+
+test('parallel publish and unpublish operations cannot make an unconfirmed state public', async () => {
+  for (const competingAction of ['unpublish', 'archive']) {
+    const harness = createHarness()
+    harness.addUpload({ operationId, uid, bytes })
+    await harness.operations.finalizeMediaUpload({ ...request, data: uploadData })
+    const gate = harness.pauseStorageVisibility('private')
+    const publishing = harness.operations.setMediaState({
+      ...request,
+      data: { operationId, action: 'publish' },
+    })
+    await gate.entered
+    const competing = harness.operations.setMediaState({
+      ...request,
+      data: { operationId, action: competingAction },
+    })
+    await assert.rejects(competing, (error) => error.code === 'aborted')
+    gate.release()
+    await publishing
+
+    for (const event of harness.events.filter((entry) => entry.startsWith('storage:public:'))) {
+      assert.equal(event, 'storage:public:published')
+    }
+    const media = harness.documents.get(`media/${operationId}`)
+    const visibility = harness.objects.get(`media/${operationId}`).metadata.metadata.visibility
+    assert.equal(media.visibility, visibility)
+    assert.equal(media.status === 'published', visibility === 'public')
+  }
+})
+
+test('publication refuses an object whose bytes no longer match its recorded SHA-256', async () => {
+  const harness = createHarness()
+  harness.addUpload({ operationId, uid, bytes })
+  await harness.operations.finalizeMediaUpload({ ...request, data: uploadData })
+  harness.objects.get(`media/${operationId}`).bytes = Buffer.from('tampered payload')
+
+  await assert.rejects(
+    harness.operations.setMediaState({ ...request, data: { operationId, action: 'publish' } }),
+    (error) => error.code === 'already-exists',
+  )
+
+  assert.equal(harness.documents.get(`media/${operationId}`).status, 'draft')
+  assert.equal(harness.objects.get(`media/${operationId}`).metadata.metadata.visibility, 'private')
+  assert.equal(harness.events.some((event) => event.startsWith('storage:public:')), false)
 })
 
 test('a stale state change rolls Storage back to private and does not change Firestore', async () => {
@@ -357,6 +658,7 @@ test('legacy assets can be made private but cannot be newly published without a 
     metadata: {
       contentType: 'image/jpeg',
       size: String(bytes.length),
+      metageneration: '1',
       metadata: { uploadedBy: uid, visibility: 'public' },
     },
   })
