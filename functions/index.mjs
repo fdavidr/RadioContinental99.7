@@ -9,6 +9,8 @@ if (!projectId) {
   throw new Error('GCLOUD_PROJECT is required to initialize multimedia Functions.')
 }
 
+const mediaRuntimeServiceAccount = 'radio-media-runtime@radio997-d5380.iam.gserviceaccount.com'
+
 initializeApp({
   storageBucket: process.env.MEDIA_STORAGE_BUCKET ?? `${projectId}.firebasestorage.app`,
 })
@@ -22,11 +24,25 @@ const mediaOperations = createMediaOperations({
 })
 
 export const finalizeMediaUpload = onCall(
-  { region: 'us-central1', concurrency: 10, maxInstances: 5, memory: '512MiB', timeoutSeconds: 120 },
+  {
+    region: 'us-central1',
+    serviceAccount: mediaRuntimeServiceAccount,
+    concurrency: 10,
+    maxInstances: 5,
+    memory: '512MiB',
+    timeoutSeconds: 120,
+  },
   mediaOperations.finalizeMediaUpload,
 )
 
 export const setMediaState = onCall(
-  { region: 'us-central1', concurrency: 10, maxInstances: 5, memory: '512MiB', timeoutSeconds: 60 },
+  {
+    region: 'us-central1',
+    serviceAccount: mediaRuntimeServiceAccount,
+    concurrency: 10,
+    maxInstances: 5,
+    memory: '512MiB',
+    timeoutSeconds: 60,
+  },
   mediaOperations.setMediaState,
 )

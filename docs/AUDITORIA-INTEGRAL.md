@@ -3055,3 +3055,92 @@ La verificación OPTIONS completa deberá hacerse después de aplicar CORS y tra
 ### Estado de la intervención y desbloqueo
 
 No se ejecutó `gcloud storage buckets update`, no se desplegaron Functions, Rules ni frontend; no se modificaron IAM, UBLA, ACL, CORS ni Firestore Rules. La causa de detención es el cambio local sin respaldo requerido por el preflight, junto a la falta de una identidad runtime desplegada cuya política efectiva pueda verificarse. La siguiente etapa requiere respaldar y revisar los cambios locales bajo una autorización de Git independiente, luego repetir `git status` y la comparación remota; confirmar permisos IAM efectivos de la cuenta runtime; recién entonces, con el mismo alcance de autorización de producción, aplicar CORS, verificar preflight y desplegar exclusivamente las dos Functions.
+
+## Preflight IAM y CORS para runtime multimedia — 2026-11-12
+
+Revisión de solo lectura y preparación de código. No se creó la cuenta de servicio, no se cambió IAM ni CORS, y no se desplegaron Functions, Storage Rules, Firestore Rules o Render.
+
+### Respaldo y estado local
+
+- `backup/media-integration-progress` remoto y rama local apuntaban a `9fc3079c0c2196b3e3cdfc74befa033eb0d100f4` al iniciar esta intervención.
+- Ese commit remoto contiene exactamente los ocho archivos funcionales de la intervención previa: este documento, `functions/index.mjs`, `functions/src/media-operations.mjs`, `functions/test/media-operations.test.mjs`, `scripts/media-functions.emulator.mjs`, `scripts/storage-rules.emulator.mjs`, `src/services/media.ts` y `storage.rules`.
+- El árbol estaba limpio y no había commits locales posteriores al empezar. Esta intervención modifica `functions/index.mjs` y este documento, por lo que ambos cambios nuevos requieren verificación y respaldo antes de cualquier despliegue.
+
+### Identidad y matriz IAM propuesta
+
+La cuenta propuesta `radio-media-runtime@radio997-d5380.iam.gserviceaccount.com` **no existe todavía**. La identidad de ejecución de `finalizeMediaUpload` y `setMediaState` no estaba fijada en el código. Se modificó `functions/index.mjs` para que ambas Functions declaren explícitamente esa cuenta en sus opciones. El despliegue debe esperar hasta que la cuenta y sus permisos estén creados y comprobados.
+
+El service account predeterminado `527560734998-compute@developer.gserviceaccount.com` sí existe y tiene `roles/editor` en el proyecto; no debe usarse como runtime. La política IAM de bucket mostraba únicamente las vinculaciones legacy asociadas a grupos de proyecto, sin una concesión directa de objetos a la cuenta dedicada (aún inexistente).
+
+| Principal/recurso | Permisos requeridos | Asignación mínima propuesta | Observación |
+|---|---|---|---|
+| Runtime → Firestore | `datastore.databases.get`, `datastore.entities.get`, `datastore.entities.list`, `datastore.entities.create`, `datastore.entities.update` | Rol personalizado de proyecto `radioMediaRuntimeFirestore` con solo esos permisos | El código necesita transacciones/lecturas, consulta limitada de `media` si el contador todavía no existe, y crear/actualizar reservas, documentos multimedia, logs y contador. No necesita borrar documentos. IAM no limita esos permisos por colección dentro de la base; el rol sigue dando lectura/creación/actualización en otras colecciones de Firestore del proyecto. Si ese alcance no se acepta, aislar los datos multimedia en otra base/proyecto o interponer un servicio antes de producción. |
+| Runtime → Storage | `storage.objects.create`, `storage.objects.get`, `storage.objects.update` | Rol personalizado `radioMediaRuntimeStorage`, definido en el proyecto y vinculado solo al bucket | Crear sesión/objeto, leer metadata y bytes para verificar SHA-256, y actualizar metadata `visibility`. No se propone `storage.objects.delete` ni `storage.objects.list`. |
+| Runtime → logs | Ningún permiso adicional para el logging actual | Ningún rol de logging | Las Functions escriben por la salida estándar/errores capturados por la plataforma. Si en el futuro se llama directamente a Cloud Logging API, evaluar `roles/logging.logWriter` aparte. |
+| Operador de despliegue → runtime SA | `iam.serviceAccounts.actAs` | `roles/iam.serviceAccountUser` vinculado al service account dedicado para la identidad operadora que despliegue | No otorgar `roles/iam.serviceAccountTokenCreator`; no se requiere impersonación para adjuntar la cuenta. El operador actualmente aparece con `roles/owner` en el proyecto, pero no se certificó el permiso efectivo sobre la cuenta propuesta. |
+
+Se inspeccionó `roles/datastore.user`: incluye `datastore.entities.delete`, además de permisos de lista/estadísticas/namespaces y otros no necesarios. Por eso se prefiere un rol personalizado sin borrado. No se ejecutó Policy Troubleshooter: `policytroubleshooter.googleapis.com` está deshabilitada y la cuenta propuesta no existe; no se habilitó esa API. En consecuencia, la autorización efectiva `actAs` y la evaluación de políticas IAM/deny heredadas quedan pendientes de comprobar después de crear la cuenta. No se afirmará que los permisos estén verificados hasta completar esa prueba.
+
+Procedimiento propuesto, **no ejecutado**:
+
+```powershell
+$project = "radio997-d5380"
+$runtime = "radio-media-runtime@radio997-d5380.iam.gserviceaccount.com"
+$bucket = "gs://radio997-d5380.firebasestorage.app"
+
+gcloud iam service-accounts create radio-media-runtime --project=$project --display-name="Radio multimedia Functions runtime"
+
+gcloud iam roles create radioMediaRuntimeFirestore --project=$project --title="Radio Media Runtime Firestore" --description="Lectura, consulta, creación y actualización requeridas por las Functions multimedia; sin borrado." --permissions=datastore.databases.get,datastore.entities.get,datastore.entities.list,datastore.entities.create,datastore.entities.update --stage=GA
+gcloud projects add-iam-policy-binding $project --member="serviceAccount:$runtime" --role="projects/$project/roles/radioMediaRuntimeFirestore"
+
+gcloud iam roles create radioMediaRuntimeStorage --project=$project --title="Radio Media Runtime Storage Objects" --description="Crear objetos, leer objeto/metadata y actualizar metadata del flujo multimedia." --permissions=storage.objects.create,storage.objects.get,storage.objects.update --stage=GA
+gcloud storage buckets add-iam-policy-binding $bucket --member="serviceAccount:$runtime" --role="projects/$project/roles/radioMediaRuntimeStorage"
+
+# Ejecutar como operador de despliegue, con el email real de su principal:
+gcloud iam service-accounts add-iam-policy-binding $runtime --project=$project --member="user:<DEPLOYER_EMAIL>" --role="roles/iam.serviceAccountUser"
+
+# Tras habilitar Policy Troubleshooter por autorización separada, comprobar permisos efectivos,
+# incluida cualquier política condicional/deny; no inferirlos solo de bindings visibles.
+gcloud policy-intelligence troubleshoot-policy iam "//storage.googleapis.com/projects/_/buckets/radio997-d5380.firebasestorage.app/objects/media/example" --principal-email=$runtime --permission=storage.objects.create --project=$project
+gcloud policy-intelligence troubleshoot-policy iam "//storage.googleapis.com/projects/_/buckets/radio997-d5380.firebasestorage.app/objects/media/example" --principal-email=$runtime --permission=storage.objects.get --project=$project
+gcloud policy-intelligence troubleshoot-policy iam "//storage.googleapis.com/projects/_/buckets/radio997-d5380.firebasestorage.app/objects/media/example" --principal-email=$runtime --permission=storage.objects.update --project=$project
+gcloud policy-intelligence troubleshoot-policy iam "//cloudresourcemanager.googleapis.com/projects/radio997-d5380" --principal-email=$runtime --permission=datastore.entities.create --project=$project
+gcloud policy-intelligence troubleshoot-policy iam "//iam.googleapis.com/projects/radio997-d5380/serviceAccounts/$runtime" --principal-email="<DEPLOYER_EMAIL>" --permission=iam.serviceAccounts.actAs --project=$project
+```
+
+Los comandos de creación/vinculación alteran IAM y requieren aprobación independiente. Antes de usarlos se debe validar que los permisos propuestos sean roles personalizados admitidos por las APIs activas, crear los roles y bindings, volver a leer sus políticas y ejecutar Troubleshooter. La política de Firestore es de alcance de proyecto y no constituye una frontera por colección.
+
+### Política CORS preparada
+
+La lectura actual de metadata GCS devolvió `cors_config: null`: el bucket no tiene CORS explícito. No se aplicó configuración. Archivo candidato `cors.json`:
+
+```json
+[
+  {
+    "origin": [
+      "https://continental997.fm",
+      "https://radiocontinental99-7.onrender.com"
+    ],
+    "method": ["GET", "PUT"],
+    "maxAgeSeconds": 3600
+  }
+]
+```
+
+No usar comodines, no agregar `OPTIONS` (lo gestiona como preflight el navegador/GCS) ni `allowedHeaders` (no es campo de la configuración CORS de GCS). Comando pendiente de autorización:
+
+```powershell
+gcloud storage buckets update gs://radio997-d5380.firebasestorage.app --cors-file=cors.json --project=radio997-d5380
+gcloud storage buckets describe gs://radio997-d5380.firebasestorage.app --project=radio997-d5380 --format="json(cors_config)"
+```
+
+Tras desplegar las Functions, verificar OPTIONS contra la URL de sesión resumible real con ambos `Origin`, método solicitado `PUT` y encabezados `Content-Type`/`Content-Range`; revisar código HTTP y `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods` y `Access-Control-Allow-Headers`. No imprimir ni guardar URLs de sesión: son credenciales portadoras. Probar también el GET de medios en navegador. No se realizaron preflights en esta intervención.
+
+### Orden y reversión pendientes
+
+1. Revisar/aprobar la matriz IAM; crear la identidad/roles/bindings en una intervención autorizada; comprobar permisos efectivos, especialmente `actAs`, con Troubleshooter habilitado y una cuenta existente.
+2. Desplegar únicamente las dos Functions desde el commit respaldado que contiene `serviceAccount`; verificar identidad runtime en la configuración desplegada, región, runtime e inicialización.
+3. Aplicar solo el CORS candidato al bucket y verificar OPTIONS/GET. Mantener Storage Rules, Firestore Rules y Render sin cambios en esta etapa.
+4. En una autorización posterior, publicar Rules/frontend y ejecutar pruebas funcionales productivas con alcance aprobado.
+
+Reversión IAM: eliminar primero los bindings de bucket/proyecto vinculados al rol personalizado, luego borrar esos roles y finalmente deshabilitar/eliminar la cuenta solo cuando no esté adjunta a Functions. Reversión CORS: restaurar la política anterior vacía con `gcloud storage buckets update gs://radio997-d5380.firebasestorage.app --clear-cors --project=radio997-d5380`. Reversión de Functions: detener el despliegue del frontend si aún no se publicó; no volver a la identidad default con `roles/editor`. No se ejecutó ninguno de estos comandos.
