@@ -26,8 +26,9 @@ export function isAuthAvailable(): boolean {
 }
 
 function actionCodeSettings(path: string) {
+  const configuredSiteUrl = import.meta.env.VITE_SITE_URL?.trim()
   return {
-    url: new URL(path, window.location.origin).toString(),
+    url: new URL(path, configuredSiteUrl || window.location.origin).toString(),
     handleCodeInApp: false,
   }
 }

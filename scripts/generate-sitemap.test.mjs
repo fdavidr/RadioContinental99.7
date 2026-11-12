@@ -155,6 +155,7 @@ test('successful build prerenders only public posts and programs into their slug
   program.fields.title = { stringValue: 'Programa público' }
   program.fields.description = { stringValue: 'Descripción pública' }
   program.fields.hostNames = { arrayValue: { values: [{ stringValue: 'Conductora' }] } }
+  const logs = []
 
   try {
     await writeFile(join(outputDirectory, 'index.html'), template, 'utf8')
@@ -167,7 +168,7 @@ test('successful build prerenders only public posts and programs into their slug
         const documents = collectionId === 'posts' ? [post, draft] : [program]
         return new Response(JSON.stringify(documents.map((item) => ({ document: item }))), { status: 200 })
       },
-      logger: { log() {}, warn(message) { assert.fail(message) } },
+      logger: { log(message) { logs.push(message) }, warn(message) { assert.fail(message) } },
     })
 
     const postPage = await readFile(join(outputDirectory, 'noticias', 'noticia-publicada', 'index.html'), 'utf8')
@@ -177,6 +178,8 @@ test('successful build prerenders only public posts and programs into their slug
     assert.match(programPage, /Programa público/)
     assert.equal(entries.has('https://radio.example/noticias/noticia-publicada'), true)
     assert.equal(entries.has('https://radio.example/programas/programa-publicado'), true)
+    assert.ok(logs.includes('Firestore devolvió 2 documentos de posts; páginas prerenderizadas: 1.'))
+    assert.ok(logs.includes('Firestore devolvió 1 documentos de programs; páginas prerenderizadas: 1.'))
     assert.doesNotMatch(sitemap, /noticia-borrador/)
     await assert.rejects(readFile(join(outputDirectory, 'noticias', 'noticia-borrador', 'index.html')))
   } finally {

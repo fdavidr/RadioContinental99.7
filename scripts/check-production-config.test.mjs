@@ -15,8 +15,11 @@ const baseEnvironment = {
   VITE_USE_FIREBASE_EMULATORS: 'false',
 }
 
-function runConfigCheck(siteUrl) {
-  return spawnSync(process.execPath, [scriptPath], {
+function runConfigCheck(siteUrl, targetProjectId) {
+  return spawnSync(process.execPath, [
+    scriptPath,
+    ...(targetProjectId ? [targetProjectId] : []),
+  ], {
     encoding: 'utf8',
     env: { ...baseEnvironment, VITE_SITE_URL: siteUrl },
   })
@@ -31,4 +34,10 @@ test('production config rejects the Render hostname as canonical', () => {
   const result = runConfigCheck('https://radiocontinental99-7.onrender.com')
   assert.equal(result.status, 1)
   assert.match(result.stderr, /https:\/\/continental997\.fm/)
+})
+
+test('production config rejects a project that differs from the requested target', () => {
+  const result = runConfigCheck('https://continental997.fm', 'radio997-d5380')
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /no coincide con VITE_FIREBASE_PROJECT_ID/)
 })

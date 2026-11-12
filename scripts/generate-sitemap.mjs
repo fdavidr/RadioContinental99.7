@@ -267,7 +267,10 @@ export async function generateSitemap({
           outputDirectory,
           socialImageUrl,
         })
-        logger.log(`Páginas prerenderizadas para ${collectionId}: ${generated}.`)
+        logger.log(
+          `Firestore devolvió ${documents.length} documentos de ${collectionId}; ` +
+          `páginas prerenderizadas: ${generated}.`,
+        )
       } catch (error) {
         failures.push(`${collectionId}: ${error.message}`)
         logger.warn(

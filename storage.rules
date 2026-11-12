@@ -7,8 +7,9 @@ service firebase.storage {
 
     function isSuperadmin() {
       return signedIn()
-        && request.auth.token.email_verified == true
-        && request.auth.token.superadmin == true;
+        ? request.auth.token.get('email_verified', false) == true
+          && request.auth.token.get('superadmin', false) == true
+        : false;
     }
 
     function validContentType(contentType) {
@@ -18,7 +19,7 @@ service firebase.storage {
       ];
     }
 
-    function validUpload() {
+    function validUpload(fileName) {
       return request.resource != null
         && validContentType(request.resource.contentType)
         && request.resource.size > 0
@@ -30,18 +31,17 @@ service firebase.storage {
           || (request.resource.contentType == 'video/mp4'
             && request.resource.size <= 52428800)
         )
-        && request.resource.metadata.visibility in ['private', 'public'];
+        && request.resource.metadata.visibility == 'private'
+        && request.resource.metadata.uploadedBy == request.auth.uid
+        && request.resource.metadata.uploadId == fileName
+        && request.resource.metadata.sha256.matches('^[a-f0-9]{64}$');
     }
 
     match /media/{fileName} {
       allow read: if isSuperadmin()
         || (resource != null && resource.metadata.visibility == 'public');
-      allow create: if isSuperadmin() && validUpload();
-      allow update: if isSuperadmin()
-        && validUpload()
-        && request.resource.contentType == resource.contentType
-        && request.resource.size == resource.size
-        && request.resource.metadata.uploadedBy == resource.metadata.uploadedBy;
+      allow create: if isSuperadmin() && resource == null && validUpload(fileName);
+      allow update: if false;
       allow delete: if false;
     }
 

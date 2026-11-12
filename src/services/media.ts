@@ -1,8 +1,10 @@
-import { getBlob, getMetadata, ref, updateMetadata, uploadBytes } from 'firebase/storage'
-import { collection, getCountFromServer, getDocs, limit, query, where } from 'firebase/firestore'
+import { getBlob, getMetadata, ref, uploadBytesResumable } from 'firebase/storage'
+import { collection, getCountFromServer, query, where } from 'firebase/firestore'
 import type { User } from 'firebase/auth'
+import { httpsCallable } from 'firebase/functions'
 
 import { firebaseStorage } from '../lib/firebaseStorage'
+import { firebaseFunctions } from '../lib/firebaseFunctions'
 import { firestore } from '../lib/firebaseFirestore'
 import { requireFirebase } from '../lib/firebaseApp'
 import type { MediaRecord } from '../types/content'
@@ -13,6 +15,8 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024
 const MAX_ACTIVE_MEDIA_RECORDS = 500
+const PREFLIGHT_TIMEOUT_MS = 30_000
+const UPLOAD_TIMEOUT_MS = 120_000
 const allowedTypes: Record<string, number> = {
   'image/jpeg': MAX_IMAGE_BYTES,
   'image/png': MAX_IMAGE_BYTES,
@@ -23,6 +27,46 @@ const allowedTypes: Record<string, number> = {
   'audio/ogg': MAX_AUDIO_BYTES,
   'audio/wav': MAX_AUDIO_BYTES,
   'video/mp4': MAX_VIDEO_BYTES,
+}
+
+export type MediaUploadStage = 'validating' | 'checking' | 'uploading'
+
+export type MediaUploadOptions = {
+  onStage?: (stage: MediaUploadStage) => void
+  onProgress?: (progress: number) => void
+}
+
+export type MediaUploadOperation = {
+  operationId: string
+  storagePath: string
+  uid: string
+  originalName: string
+  contentType: string
+  sizeBytes: number
+  altText: string
+  sha256: string
+}
+
+type MediaStateAction = 'publish' | 'unpublish' | 'archive'
+
+export class MediaUploadError extends Error {
+  readonly storagePath: string
+  readonly stage: MediaUploadStage
+  readonly errorCode?: string
+
+  constructor(
+    message: string,
+    storagePath: string,
+    stage: MediaUploadStage,
+    errorCode?: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
+    this.name = 'MediaUploadError'
+    this.storagePath = storagePath
+    this.stage = stage
+    this.errorCode = errorCode
+  }
 }
 
 function getStorage() {
@@ -53,86 +97,310 @@ function validateFile(file: File): void {
   }
 }
 
-function sanitizeFileName(name: string): string {
-  return name.normalize('NFKD').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-180)
-}
-
-export async function uploadMedia(user: User, file: File, altText: string): Promise<Pick<
-  MediaRecord,
-  'storagePath' | 'originalName' | 'contentType' | 'sizeBytes' | 'altText' | 'visibility'
->> {
-  await assertAdmin(user)
-  validateFile(file)
-  if (altText.trim().length > 500) throw new Error('El texto alternativo no puede superar 500 caracteres.')
-  let activeMediaCount: number
-  try {
-    const activeMedia = await getCountFromServer(query(
-      collection(getDatabase(), 'media'),
-      where('isArchived', '==', false),
-    ))
-    activeMediaCount = activeMedia.data().count
-  } catch (error) {
-    throw toFirebaseServiceError(error, 'No se pudo comprobar el límite de almacenamiento')
-  }
-  if (activeMediaCount >= MAX_ACTIVE_MEDIA_RECORDS) {
-    throw new Error(`Se alcanzó el límite de ${MAX_ACTIVE_MEDIA_RECORDS} registros multimedia activos. Archivá contenido o solicitá aumentar el límite.`)
-  }
-
-  const storagePath = `media/${crypto.randomUUID()}-${sanitizeFileName(file.name)}`
-  try {
-    await uploadBytes(ref(getStorage(), storagePath), file, {
-      contentType: file.type,
-      customMetadata: { visibility: 'private', uploadedBy: user.uid },
-    })
-    return {
-      storagePath,
-      originalName: file.name,
-      contentType: file.type,
-      sizeBytes: file.size,
-      altText: altText.trim(),
-      visibility: 'private',
-    }
-  } catch (error) {
-    throw toFirebaseServiceError(error, 'No se pudo cargar el archivo')
-  }
-}
-
-export async function setMediaVisibility(
-  user: User,
+function diagnostic(
+  event: string,
   storagePath: string,
-  visibility: 'private' | 'public',
-): Promise<void> {
-  await assertAdmin(user)
-  if (!storagePath.startsWith('media/') || storagePath.includes('..')) {
-    throw new Error('La ruta del medio no es válida.')
+  startedAt: number,
+  errorCode?: string,
+): void {
+  const details = {
+    event,
+    storagePath,
+    durationMs: Date.now() - startedAt,
+    ...(errorCode ? { errorCode } : {}),
   }
+  if (event === 'UPLOAD_FAILED') {
+    console.warn('[media-upload]', details)
+  } else {
+    console.info('[media-upload]', details)
+  }
+}
 
-  try {
-    if (visibility === 'public') {
-      const publishedRecord = await getDocs(query(
-        collection(getDatabase(), 'media'),
-        where('storagePath', '==', storagePath),
-        where('status', '==', 'published'),
-        where('isArchived', '==', false),
-        where('visibility', '==', 'public'),
-        limit(1),
-      ))
-      if (publishedRecord.empty) {
-        throw new Error('Publicá primero el registro del medio en Firestore y asignale visibilidad pública.')
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  if ('code' in error && typeof error.code === 'string') return error.code
+  if ('cause' in error) return errorCode(error.cause)
+  return undefined
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout>
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error(message)), timeoutMs)
+    }),
+  ]).finally(() => clearTimeout(timeout))
+}
+
+function waitForUpload(
+  task: ReturnType<typeof uploadBytesResumable>,
+  onProgress?: (progress: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let timedOut = false
+    let unsubscribe = () => {}
+    const timeout = setTimeout(() => {
+      if (settled) return
+      timedOut = true
+      const cancellationRequested = task.cancel()
+      if (!cancellationRequested && task.snapshot.state !== 'running') {
+        finish(new Error(`La carga superó el límite de ${UPLOAD_TIMEOUT_MS / 1000} segundos.`))
+      }
+    }, UPLOAD_TIMEOUT_MS)
+
+    function finish(error?: Error): void {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      unsubscribe()
+      if (error) reject(error)
+      else {
+        onProgress?.(100)
+        resolve()
       }
     }
 
-    const storageRef = ref(getStorage(), storagePath)
-    const metadata = await getMetadata(storageRef)
-    const uploadedBy = metadata.customMetadata?.uploadedBy
-    if (!uploadedBy) {
-      throw new Error('El archivo no contiene metadata de carga válida; no se modificó su visibilidad.')
-    }
-    await updateMetadata(storageRef, {
-      customMetadata: { ...metadata.customMetadata, visibility, uploadedBy, updatedBy: user.uid },
-    })
+    const stopObserving = task.on(
+      'state_changed',
+      (snapshot) => {
+        onProgress?.(snapshot.totalBytes === 0
+          ? 0
+          : Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100))
+      },
+      (error) => {
+        finish(timedOut
+          ? new Error(`La carga se canceló al superar el límite de ${UPLOAD_TIMEOUT_MS / 1000} segundos.`, { cause: error })
+          : error)
+      },
+      () => finish(),
+    )
+    unsubscribe = stopObserving
+    if (settled) unsubscribe()
+  })
+}
+
+async function hashBlob(blob: Blob): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function hashFile(file: File): Promise<string> {
+  return hashBlob(file)
+}
+
+function assertUploadOperation(user: User, operation: MediaUploadOperation): void {
+  if (
+    operation.uid !== user.uid ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(operation.operationId) ||
+    operation.storagePath !== `media/${operation.operationId}` ||
+    !/^[a-f0-9]{64}$/.test(operation.sha256)
+  ) {
+    throw new Error('La operación multimedia no coincide con la sesión actual o no es válida.')
+  }
+}
+
+async function verifyExistingUpload(operation: MediaUploadOperation): Promise<boolean> {
+  const storageRef = ref(getStorage(), operation.storagePath)
+  let metadata
+  try {
+    metadata = await getMetadata(storageRef)
   } catch (error) {
-    throw toFirebaseServiceError(error, 'No se pudo cambiar la visibilidad del archivo')
+    if (errorCode(error) === 'storage/object-not-found') return false
+    throw toFirebaseServiceError(error, 'No se pudo comprobar si la carga anterior se completó')
+  }
+  const custom = metadata.customMetadata ?? {}
+  if (
+    custom.uploadId !== operation.operationId ||
+    custom.uploadedBy !== operation.uid ||
+    custom.sha256 !== operation.sha256 ||
+    metadata.contentType !== operation.contentType ||
+    Number(metadata.size) !== operation.sizeBytes
+  ) {
+    throw new MediaUploadError(
+      'Ya existe un archivo en la ruta reservada, pero no coincide con esta operación. No se sobrescribió.',
+      operation.storagePath,
+      'checking',
+      'storage/object-already-exists',
+    )
+  }
+  const blob = await getBlob(storageRef)
+  if (await hashBlob(blob) !== operation.sha256) {
+    throw new MediaUploadError(
+      'El contenido del archivo existente no coincide con su SHA-256. No se sobrescribió.',
+      operation.storagePath,
+      'checking',
+      'storage/integrity-check-failed',
+    )
+  }
+  return true
+}
+
+export async function prepareMediaUpload(
+  user: User,
+  file: File,
+  altText: string,
+): Promise<MediaUploadOperation> {
+  validateFile(file)
+  if (!altText.trim() || altText.trim().length > 500) {
+    throw new Error('Ingresá un texto alternativo de hasta 500 caracteres.')
+  }
+  await withTimeout(
+    assertAdmin(user),
+    PREFLIGHT_TIMEOUT_MS,
+    'La verificación del rol tardó demasiado. Volvé a intentarlo.',
+  )
+  const operationId = crypto.randomUUID()
+  return {
+    operationId,
+    storagePath: `media/${operationId}`,
+    uid: user.uid,
+    originalName: file.name,
+    contentType: file.type,
+    sizeBytes: file.size,
+    altText: altText.trim(),
+    sha256: await hashFile(file),
+  }
+}
+
+export async function uploadMedia(
+  user: User,
+  file: File,
+  operation: MediaUploadOperation,
+  options: MediaUploadOptions,
+): Promise<Pick<
+  MediaRecord,
+  'storagePath' | 'originalName' | 'contentType' | 'sizeBytes' | 'altText' | 'visibility'
+>> {
+  const { onStage, onProgress } = options
+  const { storagePath } = operation
+  const startedAt = Date.now()
+  let stage: MediaUploadStage = 'validating'
+  diagnostic('UPLOAD_STARTED', storagePath, startedAt)
+  try {
+    assertUploadOperation(user, operation)
+    onStage?.(stage)
+    validateFile(file)
+    if (
+      file.name !== operation.originalName ||
+      file.type !== operation.contentType ||
+      file.size !== operation.sizeBytes ||
+      await hashFile(file) !== operation.sha256
+    ) {
+      throw new Error('El archivo seleccionado no coincide con la carga pendiente.')
+    }
+    await assertAdmin(user)
+
+    stage = 'checking'
+    onStage?.(stage)
+    const activeMedia = await withTimeout(
+      getCountFromServer(query(
+        collection(getDatabase(), 'media'),
+        where('isArchived', '==', false),
+      )),
+      PREFLIGHT_TIMEOUT_MS,
+      'La verificación de la biblioteca tardó demasiado. Volvé a intentarlo.',
+    )
+    if (activeMedia.data().count >= MAX_ACTIVE_MEDIA_RECORDS) {
+      throw new Error(`Se alcanzó el límite de ${MAX_ACTIVE_MEDIA_RECORDS} registros multimedia activos. Archivá contenido o solicitá aumentar el límite.`)
+    }
+    if (await withTimeout(
+      verifyExistingUpload(operation),
+      PREFLIGHT_TIMEOUT_MS,
+      'La comprobación del archivo existente tardó demasiado. La recuperación puede reintentarse con el mismo ID.',
+    )) {
+      return {
+        storagePath,
+        originalName: operation.originalName,
+        contentType: operation.contentType,
+        sizeBytes: operation.sizeBytes,
+        altText: operation.altText,
+        visibility: 'private',
+      }
+    }
+
+    stage = 'uploading'
+    onStage?.(stage)
+    const task = uploadBytesResumable(ref(getStorage(), storagePath), file, {
+      contentType: file.type,
+      customMetadata: {
+        visibility: 'private',
+        uploadedBy: user.uid,
+        uploadId: operation.operationId,
+        sha256: operation.sha256,
+      },
+    })
+    try {
+      await waitForUpload(task, onProgress)
+    } catch (uploadError) {
+      const recovered = await withTimeout(
+        verifyExistingUpload(operation),
+        PREFLIGHT_TIMEOUT_MS,
+        'La comprobación del resultado de Storage tardó demasiado. La recuperación puede reintentarse con el mismo ID.',
+      )
+      if (!recovered) throw uploadError
+    }
+    diagnostic('STORAGE_UPLOAD_COMPLETED', storagePath, startedAt)
+    return {
+      storagePath,
+      originalName: operation.originalName,
+      contentType: operation.contentType,
+      sizeBytes: operation.sizeBytes,
+      altText: operation.altText,
+      visibility: 'private',
+    }
+  } catch (error) {
+    const errorCodeValue = errorCode(error)
+    const friendlyError = toFirebaseServiceError(error, 'No se pudo completar la carga multimedia')
+    const message = friendlyError.message
+    diagnostic('UPLOAD_FAILED', storagePath, startedAt, errorCodeValue)
+    throw new MediaUploadError(
+      message,
+      storagePath,
+      stage,
+      errorCodeValue,
+      { cause: friendlyError },
+    )
+  }
+}
+
+export async function finalizeMediaUpload(
+  user: User,
+  operation: MediaUploadOperation,
+): Promise<string> {
+  await assertAdmin(user)
+  assertUploadOperation(user, operation)
+  try {
+    const functions = requireFirebase(firebaseFunctions, 'Functions')
+    const finalize = httpsCallable<MediaUploadOperation, { mediaId: string }>(
+      functions,
+      'finalizeMediaUpload',
+      { timeout: 30_000 },
+    )
+    const result = await finalize(operation)
+    return result.data.mediaId
+  } catch (error) {
+    throw toFirebaseServiceError(error, 'No se pudo verificar y registrar el archivo multimedia')
+  }
+}
+
+export async function changeMediaState(
+  user: User,
+  operationId: string,
+  action: MediaStateAction,
+  expectedUpdatedAt?: number,
+): Promise<void> {
+  await assertAdmin(user)
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(operationId)) {
+    throw new Error('El identificador del medio no es válido.')
+  }
+  try {
+    const functions = requireFirebase(firebaseFunctions, 'Functions')
+    const changeState = httpsCallable(functions, 'setMediaState', { timeout: 60_000 })
+    await changeState({ operationId, action, expectedUpdatedAt })
+  } catch (error) {
+    throw toFirebaseServiceError(error, 'No se pudo cambiar el estado del medio')
   }
 }
 

@@ -1,0 +1,610 @@
+﻿[
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "publishedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/tags/indexes/CICAgNiav4AK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "categoryId",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "publishedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/programs/indexes/CICAgJim14AK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "slug",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "ASCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/programs/indexes/CICAgLjy8IAK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "publishedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/programs/indexes/CICAgOjXh4EK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "visibility",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "publishedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/media/indexes/CICAgNiroIEK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "arrayConfig": "CONTAINS",
+        "fieldPath": "categoryIds"
+      },
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "publishedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/posts/indexes/CICAgJj7z4EK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "updatedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/tags/indexes/CICAgLiT6IEK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "storagePath",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "visibility",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "ASCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/media/indexes/CICAgNjpgYIK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "slug",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "ASCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/posts/indexes/CICAgLjRyYIK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "arrayConfig": "CONTAINS",
+        "fieldPath": "searchTerms"
+      },
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "publishedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/posts/indexes/CICAgJjF9oIK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "dayOfWeek",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "startTime",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "ASCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/schedule/indexes/CICAgLiIkYMK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "arrayConfig": "CONTAINS",
+        "fieldPath": "searchTerms"
+      },
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "publishedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/programs/indexes/CICAgJiUpoMK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "programId",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "ASCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/schedule/indexes/CICAgPig2YMK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "arrayConfig": "CONTAINS",
+        "fieldPath": "tagIds"
+      },
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "publishedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/posts/indexes/CICAgNi47oMK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "updatedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/posts/indexes/CICAgNjp84oK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "updatedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/schedule/indexes/CICAgNi4o4sK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "placement",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "ASCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/banners/indexes/CICAgOi3kJAK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "updatedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/media/indexes/CICAgNirtJAK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "updatedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/banners/indexes/CICAgJiH2JAK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "publishedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/posts/indexes/CICAgJiUsZIK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "publishedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/categories/indexes/CICAgNi4-ZIK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "updatedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/categories/indexes/CICAgLjRnZMK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "updatedAt",
+        "order": "DESCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "DESCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/programs/indexes/CICAgJjFqZMK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "startTime",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "ASCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/schedule/indexes/CICAgNjp5ZMK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  },
+  {
+    "density": "SPARSE_ALL",
+    "fields": [
+      {
+        "fieldPath": "programId",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "status",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "isArchived",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "dayOfWeek",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "startTime",
+        "order": "ASCENDING"
+      },
+      {
+        "fieldPath": "__name__",
+        "order": "ASCENDING"
+      }
+    ],
+    "name": "projects/radio997-d5380/databases/(default)/collectionGroups/schedule/indexes/CICAgNjpr5sK",
+    "queryScope": "COLLECTION",
+    "state": "CREATING"
+  }
+]

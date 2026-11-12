@@ -11,7 +11,7 @@
     "test": "node --test",
     "admin:roles": "node scripts/admin-roles.mjs",
     "generate:sitemap": "node scripts/generate-sitemap.mjs",
-    "deploy:prepare": "node scripts/check-production-config.mjs && npm run build && node scripts/generate-sitemap.mjs --require-editorial-prerender",
+    "deploy:prepare": "node scripts/check-production-config.mjs radio997-d5380 && npm run build && node scripts/generate-sitemap.mjs --require-editorial-prerender",
     "preview": "vite preview"
   },
   "dependencies": {
