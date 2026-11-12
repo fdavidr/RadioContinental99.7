@@ -24,6 +24,7 @@ class TestTimestamp {
 function createHarness() {
   const documents = new Map()
   const objects = new Map()
+  const uploadSessions = []
   let transactions = Promise.resolve()
 
   function reference(collectionName, id) {
@@ -109,6 +110,10 @@ function createHarness() {
     file(path) {
       const object = objects.get(path)
       return {
+        async createResumableUpload(options) {
+          uploadSessions.push({ path, options })
+          return [`https://storage.googleapis.com/upload-session/${uploadSessions.length}`]
+        },
         async getMetadata() {
           if (!object) throw Object.assign(new Error('missing'), { code: 404 })
           return [structuredClone(object.metadata)]
@@ -134,8 +139,17 @@ function createHarness() {
     HttpsError: CallableError,
   })
 
-  function addUpload({ operationId, uid, bytes, sha256, contentType = 'image/jpeg' }) {
+  function addUpload({
+    operationId,
+    uid,
+    bytes,
+    sha256,
+    contentType = 'image/jpeg',
+    originalName = 'radio.jpg',
+    altText = 'Cabina de radio',
+  }) {
     const data = Buffer.from(bytes)
+    const digest = sha256 ?? createHash('sha256').update(data).digest('hex')
     objects.set(`media/${operationId}`, {
       bytes: data,
       metadata: {
@@ -144,14 +158,22 @@ function createHarness() {
         metadata: {
           uploadId: operationId,
           uploadedBy: uid,
-          sha256: sha256 ?? createHash('sha256').update(data).digest('hex'),
+          sha256: digest,
           visibility: 'private',
         },
       },
     })
+    documents.set(`mediaUploadReservations/${operationId}`, {
+      uid,
+      originalName,
+      contentType,
+      sizeBytes: data.length,
+      altText,
+      sha256: digest,
+    })
   }
 
-  return { db, documents, objects, operations, addUpload }
+  return { db, documents, objects, uploadSessions, operations, addUpload }
 }
 
 const operationId = 'c2d30104-f7e6-40fb-a3f6-a29f31c4bfab'
@@ -170,6 +192,41 @@ const uploadData = {
   sha256,
 }
 
+test('upload session requires a verified superadmin and creates only with ifGenerationMatch=0', async () => {
+  const harness = createHarness()
+  const result = await harness.operations.finalizeMediaUpload({
+    ...request,
+    data: { ...uploadData, phase: 'start' },
+  })
+
+  assert.deepEqual(result, { uploadUrl: 'https://storage.googleapis.com/upload-session/1' })
+  assert.equal(harness.uploadSessions[0].path, `media/${operationId}`)
+  assert.equal(harness.uploadSessions[0].options.preconditionOpts.ifGenerationMatch, 0)
+  assert.equal(harness.uploadSessions[0].options.metadata.metadata.uploadedBy, uid)
+  assert.equal(harness.uploadSessions[0].options.metadata.metadata.sha256, sha256)
+  assert.equal(harness.objects.size, 0)
+  assert.equal(harness.documents.size, 1)
+  assert.equal(harness.documents.has(`media/${operationId}`), false)
+})
+
+test('one operation ID cannot reserve sessions for different payloads concurrently', async () => {
+  const harness = createHarness()
+  const first = { ...uploadData, phase: 'start' }
+  const second = {
+    ...uploadData,
+    phase: 'start',
+    sha256: '0'.repeat(64),
+  }
+  const results = await Promise.allSettled([
+    harness.operations.finalizeMediaUpload({ ...request, data: first }),
+    harness.operations.finalizeMediaUpload({ ...request, data: second }),
+  ])
+
+  assert.equal(results.filter(({ status }) => status === 'fulfilled').length, 1)
+  assert.equal(results.filter(({ status }) => status === 'rejected').length, 1)
+  assert.equal(harness.uploadSessions.length, 1)
+})
+
 test('finalization verifies object identity and hash, then is idempotent', async () => {
   const harness = createHarness()
   harness.addUpload({ operationId, uid, bytes })
@@ -179,14 +236,14 @@ test('finalization verifies object identity and hash, then is idempotent', async
   ])
 
   assert.deepEqual(result, { mediaId: operationId })
-  assert.equal(harness.documents.size, 3)
+  assert.equal(harness.documents.size, 4)
   const media = harness.documents.get(`media/${operationId}`)
   assert.equal(media.createdBy, uid)
   assert.equal(media.storagePath, `media/${operationId}`)
   assert.equal(media.status, 'draft')
   assert.equal(media.visibility, 'private')
 
-  assert.equal(harness.documents.size, 3)
+  assert.equal(harness.documents.size, 4)
 })
 
 test('finalization rejects unauthenticated, unverified, and non-superadmin callers', async () => {
@@ -202,7 +259,7 @@ test('finalization rejects unauthenticated, unverified, and non-superadmin calle
       CallableError,
     )
   }
-  assert.equal(harness.documents.size, 0)
+  assert.equal(harness.documents.size, 1)
 })
 
 test('finalization rejects mismatched hashes, uploaders, and existing document collisions', async () => {
@@ -212,7 +269,7 @@ test('finalization rejects mismatched hashes, uploaders, and existing document c
     badHash.operations.finalizeMediaUpload({ ...request, data: uploadData }),
     CallableError,
   )
-  assert.equal(badHash.documents.size, 0)
+  assert.equal(badHash.documents.has(`media/${operationId}`), false)
 
   const wrongOwner = createHarness()
   wrongOwner.addUpload({ operationId, uid: 'another-user', bytes })
@@ -220,7 +277,7 @@ test('finalization rejects mismatched hashes, uploaders, and existing document c
     wrongOwner.operations.finalizeMediaUpload({ ...request, data: uploadData }),
     CallableError,
   )
-  assert.equal(wrongOwner.documents.size, 0)
+  assert.equal(wrongOwner.documents.has(`media/${operationId}`), false)
 
   const collision = createHarness()
   collision.addUpload({ operationId, uid, bytes })
@@ -244,7 +301,7 @@ test('the trusted counter prevents creating a 501st active media record', async 
     harness.operations.finalizeMediaUpload({ ...request, data: uploadData }),
     (error) => error.code === 'resource-exhausted',
   )
-  assert.equal(harness.documents.size, 500)
+  assert.equal(harness.documents.size, 501)
 })
 
 test('state changes verify ownership and are idempotent after success', async () => {

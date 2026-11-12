@@ -42,6 +42,79 @@ function sameMedia(existing, expected, uid) {
 }
 
 export function createMediaOperations({ db, bucket, FieldValue, Timestamp, HttpsError }) {
+  function validateUploadData(data) {
+    if (
+      typeof data.originalName !== 'string' || data.originalName.length < 1 || data.originalName.length > 180 ||
+      typeof data.contentType !== 'string' || !IMAGE_TYPES.has(data.contentType) ||
+      !Number.isInteger(data.sizeBytes) || data.sizeBytes < 1 || data.sizeBytes > MAX_IMAGE_BYTES ||
+      typeof data.altText !== 'string' || data.altText.trim().length < 1 || data.altText.trim().length > 500 ||
+      !SHA256.test(data.sha256 ?? '')
+    ) {
+      throw new HttpsError('invalid-argument', 'Los datos del archivo no son válidos.')
+    }
+  }
+
+  function reservationMatches(reservation, data, uid) {
+    return reservation.uid === uid &&
+      reservation.originalName === data.originalName &&
+      reservation.contentType === data.contentType &&
+      reservation.sizeBytes === data.sizeBytes &&
+      reservation.altText === data.altText.trim() &&
+      reservation.sha256 === data.sha256
+  }
+
+  async function reserveUpload(data, uid) {
+    const reservationRef = db.collection('mediaUploadReservations').doc(data.operationId)
+    await db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(reservationRef)
+      if (snapshot.exists) {
+        if (!reservationMatches(snapshot.data(), data, uid)) {
+          throw new HttpsError('already-exists', 'El identificador ya está reservado para otra carga; no se inició una segunda transferencia.')
+        }
+        return
+      }
+      transaction.create(reservationRef, {
+        uid,
+        originalName: data.originalName,
+        contentType: data.contentType,
+        sizeBytes: data.sizeBytes,
+        altText: data.altText.trim(),
+        sha256: data.sha256,
+        createdAt: FieldValue.serverTimestamp(),
+      })
+    })
+  }
+
+  async function createUploadSession(request, data) {
+    const { operationId } = data
+    const { uid } = request.auth
+    await reserveUpload(data, uid)
+    const file = bucket.file(`media/${operationId}`)
+    try {
+      const [uploadUrl] = await file.createResumableUpload({
+        preconditionOpts: { ifGenerationMatch: 0 },
+        metadata: {
+          contentType: data.contentType,
+          metadata: {
+            visibility: 'private',
+            uploadedBy: uid,
+            uploadId: operationId,
+            sha256: data.sha256,
+          },
+        },
+      })
+      return { uploadUrl }
+    } catch (error) {
+      if (error.code === 409 || error.code === 412) {
+        throw new HttpsError(
+          'already-exists',
+          'Ya existe un archivo para este identificador. Verificá la carga anterior antes de reintentar.',
+        )
+      }
+      throw new HttpsError('unavailable', 'No se pudo iniciar una carga protegida en Storage.')
+    }
+  }
+
   async function getOwnedObject(operationId, uid, expected = {}) {
     const file = bucket.file(`media/${operationId}`)
     let metadata
@@ -84,17 +157,27 @@ export function createMediaOperations({ db, bucket, FieldValue, Timestamp, Https
     const data = request.data
     requireOperation(data, HttpsError)
     if (
-      typeof data.originalName !== 'string' || data.originalName.length < 1 || data.originalName.length > 180 ||
-      typeof data.contentType !== 'string' || !IMAGE_TYPES.has(data.contentType) ||
-      !Number.isInteger(data.sizeBytes) || data.sizeBytes < 1 || data.sizeBytes > MAX_IMAGE_BYTES ||
-      typeof data.altText !== 'string' || data.altText.trim().length < 1 || data.altText.trim().length > 500 ||
-      !SHA256.test(data.sha256 ?? '')
+      data.uid !== undefined && data.uid !== request.auth.uid ||
+      data.storagePath !== undefined && data.storagePath !== `media/${data.operationId}`
     ) {
-      throw new HttpsError('invalid-argument', 'Los datos del archivo no son válidos.')
+      throw new HttpsError('invalid-argument', 'La identidad o ruta de la operación no es válida.')
     }
+    validateUploadData(data)
+    if (data.phase !== undefined && !['start', 'finalize'].includes(data.phase)) {
+      throw new HttpsError('invalid-argument', 'La fase de carga no es válida.')
+    }
+    if (data.phase === 'start') return createUploadSession(request, data)
 
     const { operationId } = data
     const { uid } = request.auth
+    const reservationRef = db.collection('mediaUploadReservations').doc(operationId)
+    const reservationSnapshot = await reservationRef.get()
+    if (!reservationSnapshot.exists) {
+      throw new HttpsError('failed-precondition', 'No existe una reserva de carga coincidente. Iniciá la carga nuevamente con el mismo identificador.')
+    }
+    if (!reservationMatches(reservationSnapshot.data(), data, uid)) {
+      throw new HttpsError('already-exists', 'El identificador está reservado para otra operación multimedia.')
+    }
     await getOwnedObject(operationId, uid, data)
     const mediaRef = db.collection('media').doc(operationId)
     const logRef = db.collection('adminLogs').doc(`media-${operationId}`)

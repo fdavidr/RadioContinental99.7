@@ -4,7 +4,14 @@ import { getStorage } from 'firebase-admin/storage'
 import { HttpsError, onCall } from 'firebase-functions/v2/https'
 import { createMediaOperations } from './src/media-operations.mjs'
 
-initializeApp()
+const projectId = process.env.GCLOUD_PROJECT
+if (!projectId) {
+  throw new Error('GCLOUD_PROJECT is required to initialize multimedia Functions.')
+}
+
+initializeApp({
+  storageBucket: process.env.MEDIA_STORAGE_BUCKET ?? `${projectId}.firebasestorage.app`,
+})
 
 const mediaOperations = createMediaOperations({
   db: getFirestore(),
@@ -15,11 +22,11 @@ const mediaOperations = createMediaOperations({
 })
 
 export const finalizeMediaUpload = onCall(
-  { concurrency: 10, maxInstances: 5, memory: '512MiB', timeoutSeconds: 120 },
+  { region: 'us-central1', concurrency: 10, maxInstances: 5, memory: '512MiB', timeoutSeconds: 120 },
   mediaOperations.finalizeMediaUpload,
 )
 
 export const setMediaState = onCall(
-  { concurrency: 10, maxInstances: 5, memory: '512MiB', timeoutSeconds: 60 },
+  { region: 'us-central1', concurrency: 10, maxInstances: 5, memory: '512MiB', timeoutSeconds: 60 },
   mediaOperations.setMediaState,
 )

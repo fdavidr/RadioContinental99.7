@@ -2538,3 +2538,520 @@ Se añadió a `storage.rules` la condición explícita `resource == null`, y se 
 No se ejecutó Firebase Deploy, Render Deploy, commit, push, migración ni operación productiva. No se modificaron usuarios, claims, IAM o configuración persistente de Java/CLI. El árbol ya contenía cambios locales de intervenciones anteriores, preservados.
 
 **VEREDICTO: NO APTO.** Las Rules secuenciales y la integración del backend pasan, pero dos cargas directas simultáneas al mismo ID son aceptadas por Storage Emulator. Por ello no está demostrado el requisito de no sobrescribir bytes ni de mantener la asociación documento/objeto bajo esa carrera. No publicar Rules, Functions ni web hasta diseñar y probar una escritura atómica de objeto (por ejemplo, carga mediada por backend con precondición de generación `ifGenerationMatch=0` o mecanismo equivalente) y repetir el caso concurrente, incluyendo la verificación de que exactamente una carga puede confirmar y que los bytes/documentos no quedan inconsistentes. App Check y migración de activos antiguos permanecen como trabajos separados.
+
+## Fase 2 — intervención 1: Storage y concurrencia multimedia (2026-11-12)
+
+### Inspección de infraestructura — solo lectura
+
+| Dato | Resultado |
+|---|---|
+| Proyecto | `radio997-d5380`, número `527560734998`. |
+| Bucket esperado | `radio997-d5380.firebasestorage.app`. La consulta devolvió 404; el inventario no encontró buckets ni alternativas. No se creó ninguno. |
+| Firestore | Base `(default)`, modo `FIRESTORE_NATIVE`, ubicación `nam5`. |
+| Functions | Antes del cambio, `functions/index.mjs` no declaraba región y dependía del default de Firebase Functions, `us-central1`. El código local ahora fija explícitamente `us-central1` para preservar ese comportamiento. No se pudo confirmar si hay Functions desplegadas. |
+| APIs observadas | Habilitadas: `storage.googleapis.com`, `storage-component.googleapis.com`, `firestore.googleapis.com`, `firebase.googleapis.com`, `firebaserules.googleapis.com`, `pubsub.googleapis.com`, `serviceusage.googleapis.com`. Deshabilitadas: `firebasestorage.googleapis.com`, `cloudfunctions.googleapis.com`, `run.googleapis.com`, `artifactregistry.googleapis.com`, `cloudbuild.googleapis.com`, `eventarc.googleapis.com`, `iam.googleapis.com`. |
+| Facturación | No verificable: Cloud Billing API no estaba habilitada. La creación de un nuevo bucket de Firebase Storage requiere el plan Blaze; el estado actual de vinculación a facturación queda pendiente de confirmación en Firebase Console. |
+| Restricciones de ubicación | No verificables para el proyecto: Organization Policy API estaba deshabilitada. La documentación de Google lista `southamerica-west1` (Santiago) y `southamerica-east1` (São Paulo), pero no se demostró que la política del proyecto permita ambas. |
+
+Como recomendación operativa inicial se propone `us-central1` para el bucket: conserva la región actual de Functions y queda cerca de Firestore `nam5`, donde la Function descarga y verifica el archivo completo antes de registrarlo. Esto reduce transferencias y saltos entre Storage y el backend. `southamerica-west1` podría reducir latencia de carga directa desde Bolivia, pero requeriría confirmar disponibilidad y evaluar/cambiar la región de Functions para evitar transferir los bytes entre Sudamérica y `us-central1`; Firestore seguiría en `nam5`. La decisión final debe confirmarse en la consola antes de crear el bucket. No se hizo una selección productiva ni se validó facturación o elegibilidad de región.
+
+### Corrección local de concurrencia y arquitectura de carga
+
+El intento inicial contra Storage Emulator confirmó que este emulador acepta dos sesiones reanudables sobre la misma ruta aun cuando se solicita `ifGenerationMatch=0`. Esa precondición, por sí sola, no sirve como evidencia de exclusión mutua dentro del Emulator.
+
+La corrección local usa ahora dos controles complementarios:
+
+1. `finalizeMediaUpload` acepta fases `start` y `finalize`. Al iniciar, una transacción de Firestore crea `mediaUploadReservations/{operationId}` ligada al UID, SHA-256, tipo, tamaño, nombre y texto alternativo. Una operación concurrente con el mismo ID pero payload distinto se rechaza antes de emitir una sesión de carga. El reintento de la misma operación conserva su reserva.
+2. Solo después de reservar, la Function crea una sesión GCS resumible con `preconditionOpts.ifGenerationMatch: 0` y metadata de UID, ID y SHA-256. La reserva transaccional da cobertura verificable en Emulator; la precondición GCS es una segunda barrera prevista para Storage real. La respuesta callable entrega la URI de sesión al cliente para uso en memoria, no se escribe en Firestore ni en logs.
+3. La Function de finalización exige una reserva coincidente, verifica UID/ID/ruta, descarga el objeto y vuelve a calcular SHA-256 antes de la transacción que crea el documento multimedia y su log. Un hash o registro conflictivo no se acepta.
+4. El cliente usa `XMLHttpRequest` hacia la sesión resumible con progreso y timeout de 120 segundos; al expirar llama `abort()` para cancelar la transferencia y libera sus listeners. Los errores HTTP 401/403/404/412 reciben mensajes específicos. El cliente valida HTTPS y el host de GCS en producción, y limita la URL local al Storage Emulator en desarrollo.
+5. `storage.rules` deniega toda escritura directa del cliente, incluyendo superadministradores; conserva las lecturas administrativas y públicas por visibilidad. Las Functions usan Admin SDK, no quedan sujetas a esa denegación. `firestore.rules` no se modificó.
+6. La inicialización Admin fija el bucket a `MEDIA_STORAGE_BUCKET` o, en su ausencia, `${GCLOUD_PROJECT}.firebasestorage.app`; así el código no depende de una inferencia del SDK. No se introdujo configuración local con credenciales.
+
+El Emulator no prueba que GCS real respete la precondición de generación: el bucket no existe. La prueba concurrente sí demuestra que dos payloads diferentes no pueden obtener simultáneamente sesiones aceptadas para el mismo ID, gracias a la transacción de reserva; la prueba con un mismo payload/hash puede iniciar más de una sesión y depende también de la precondición GCS para que Storage real limite la creación del objeto. La verificación en GCS real queda pendiente de habilitar Storage y requiere autorización separada. Las reservas se conservan como marcadores para impedir reutilizar IDs; esto consume un documento Firestore por operación iniciada y debe considerarse en costos/retención.
+
+### Pruebas y validación ejecutadas
+
+Entorno de esta ejecución: Eclipse Temurin JDK `21.0.13+9-LTS` (configurado solo en el proceso), Node `v20.18.0`, npm `10.8.2`, Firebase CLI `15.36.0`, Firebase Web SDK `11.10.0`, Firebase Admin `13.10.0`, Firebase Functions `7.4.0` y `@firebase/rules-unit-testing` `4.0.1`. Los emuladores usaron los puertos Auth `9099`, Firestore `8080`, Functions `5001` y Storage `9199`; las Rules de los harnesses se leyeron desde los archivos locales indicados.
+
+| Suite/comando | Resultado |
+|---|---|
+| Firebase Emulator, comando: `npx --yes firebase-tools@15.36.0 emulators:exec --project demo-radio-rules --only auth,firestore,storage,functions "node --test --test-concurrency=1 scripts/firestore-rules.emulator.mjs scripts/storage-rules.emulator.mjs scripts/media-functions.emulator.mjs"` | **APROBADO: 25/25**; proyecto `demo-radio-rules` únicamente. |
+| Firestore Rules | **17/17**; se cargó `firestore.rules` local. Incluye autorización, lecturas públicas/privadas y denegación de escrituras directas de registros multimedia. |
+| Storage Rules | **2/2**; se cargó `storage.rules` local. Incluye denegación de escrituras directas/resumibles incluso para superadmin y lectura pública/privada. |
+| Auth + Functions + Storage + Firestore | **6/6**; autenticación y claims de Auth Emulator, sesiones de Storage Emulator, llamadas Functions Emulator y documentos/logs Firestore Emulator. Incluye reintento/idempotencia, permisos, hash/ruta/UID, transición, compensación y dos payloads distintos concurrentes con el mismo ID; exactamente una sesión obtuvo transferencia exitosa y quedó el objeto/documento de esa operación. |
+| Unit tests integrados `npm test` | **41/41**. |
+| Functions aisladas (`Push-Location functions; npm test; Pop-Location`) | **9/9**. |
+| `npm run typecheck` | **APROBADO**. |
+| `npm run build` | **APROBADO**. |
+| Oxlint dirigido a cliente, Functions y harnesses | Exit code 0; sin errores. |
+| `git diff --check` | **APROBADO**, sin errores de whitespace. |
+
+La prueba de timeout callable usa un deadline corto para forzar respuesta ambigua después de completar la transferencia al Emulator y confirma finalización/idempotencia; no es una simulación de espera real de 120 segundos. La cancelación de XHR está implementada, pero no se ejecutó una prueba de navegador que mantenga una transferencia 120 segundos y observe la cancelación en el servidor. Las fallas de Firestore/Storage siguen siendo fixtures/control de versión en el Emulator, no fallas físicas inyectadas. El Emulator mostró una advertencia de ADC presentes para servicios no emulados; todas las llamadas de esta suite se dirigieron a los puertos locales y al proyecto `demo-radio-rules`.
+
+### APIs, habilitación y procedimiento de despliegue — no ejecutado
+
+La creación de Storage y Functions requiere Blaze y los permisos para habilitar servicios/crear recursos, vincular facturación si no existe, desplegar Rules y administrar Functions. Las APIs indicadas como deshabilitadas pueden habilitarse, solo después de autorización y de confirmar costos/permisos, con:
+
+```powershell
+gcloud services enable firebasestorage.googleapis.com cloudfunctions.googleapis.com run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com eventarc.googleapis.com iam.googleapis.com --project radio997-d5380
+```
+
+`storage.googleapis.com`, Firestore, Firebase, Rules y Service Usage ya figuraban habilitadas; no se ejecutó el comando. La habilitación de Cloud Build/Artifact Registry y el despliegue de Functions pueden generar costos; deben verificarse cuotas y facturación antes de continuar.
+
+Orden propuesto, separado y con verificaciones entre pasos:
+
+1. Confirmar Blaze, región aceptada y crear el bucket Firebase predeterminado exacto `radio997-d5380.firebasestorage.app` desde Firebase Console, con ubicación acordada. Comprobar después su existencia, proyecto, región y acceso del Admin SDK. No se recomienda crear un bucket alternativo.
+2. Habilitar únicamente las APIs requeridas indicadas arriba, si aún siguen deshabilitadas.
+3. Desplegar primero las dos Functions requeridas para habilitar el endpoint antes de que el nuevo cliente lo llame:
+
+   ```powershell
+   npx --yes firebase-tools@15.36.0 deploy --only functions:finalizeMediaUpload,functions:setMediaState --project radio997-d5380
+   ```
+
+4. Publicar la aplicación web en el servicio Render existente mediante su procedimiento de despliegue desde el commit aprobado. No hay un comando Render verificado para este repositorio; no ejecutar un deploy de Firebase Hosting para sustituirlo.
+5. Después de confirmar que la versión nueva del frontend carga y finaliza medios, publicar exclusivamente Storage Rules:
+
+   ```powershell
+   npx --yes firebase-tools@15.36.0 deploy --only storage --project radio997-d5380
+   ```
+
+   Este paso bloquea las escrituras directas; debe coordinarse con el paso de frontend para evitar que una versión antigua del panel quede sin capacidad de carga. No usar `firebase deploy` general. No desplegar Firestore Rules, índices ni Functions adicionales.
+6. Verificar con una cuenta administrativa autorizada una carga nueva, hash/bytes, registro y log, reintento, denegación de carga directa, publicación/despublicación y lectura privada/pública; verificar también los logs y rollback antes de cerrar.
+
+Reversión: si falla el flujo nuevo, detener la publicación de más cambios, restaurar la versión frontend previa y la versión de Functions previamente registrada; inspeccionar las cargas incompletas/reservas sin borrar objetos ni registros automáticamente. No revertir Storage Rules a permisos amplios sin auditoría y autorización explícita. No ejecutar limpieza de reservas ni migración de medios en esta intervención.
+
+### Límites, no ejecutado y veredicto
+
+No se ejecutó `firebase deploy`, `gcloud services enable`, creación de bucket, cambio de facturación, migración, escritura productiva, deploy Render, commit ni push. No se modificaron Firestore Rules, datos, usuarios, claims, IAM, DNS ni App Check. El estado de Rules activas y de Functions desplegadas sigue sin confirmación: las APIs deshabilitadas impidieron verificarlo, y no deben inferirse del estado local.
+
+Continúan pendientes: confirmar billing/ubicación en consola; crear bucket y habilitar APIs; verificar la precondición `ifGenerationMatch=0` contra GCS real; probar cancelación de XHR desde navegador; revisar reglas/Functions activas en producción; desplegar con autorización; y migrar medios antiguos solo con un procedimiento aprobado. App Check sigue sin habilitarse. La anterior evaluación **NO APTO** describía el fallo del flujo antiguo de escritura directa y queda superada únicamente para el nuevo flujo local contra Emulator; no constituye aprobación productiva.
+
+**VEREDICTO: APTO CON OBSERVACIONES para continuar a revisión de despliegue; NO APTO para publicar ahora.** La concurrencia con payloads distintos quedó protegida por reserva transaccional y pasó 25/25 pruebas de Emulator. La precondición GCS real, bucket, billing, políticas de ubicación, estado productivo de Rules/Functions y la prueba de cancelación de navegador siguen sin evidencia; no se autoriza ni recomienda despliegue hasta resolverlos.
+
+## Fase 2 — intervención 2: decisión de región y costos de Storage (2026-11-12)
+
+### Fuentes oficiales y alcance de verificación
+
+Se consultaron el [modelo de precios de Firebase](https://firebase.google.com/pricing), la [selección de ubicaciones de Cloud Storage for Firebase](https://firebase.google.com/docs/storage/locations), la [guía de regiones de Cloud Functions](https://firebase.google.com/docs/functions/locations), la [lista de ubicaciones de Cloud Storage](https://cloud.google.com/storage/docs/locations#available-locations), los [precios de Cloud Storage](https://cloud.google.com/storage/pricing) y la [información de facturación por proyecto](https://cloud.google.com/billing/docs/how-to/modify-project). Los importes de los servicios Google se actualizan por región y producto; esta sección distingue las cuotas oficiales consultadas de los importes variables que no se pudieron verificar para las condiciones de la cuenta.
+
+Las dos ubicaciones existen en el catálogo público de Cloud Storage y Firebase permite seleccionar ubicaciones de Cloud Storage disponibles para nuevos buckets `*.firebasestorage.app`. Esto no demuestra elegibilidad específica del proyecto: `Organization Policy API` seguía deshabilitada y no se verificó la política de ubicación de `radio997-d5380`. Tampoco se verificó nuevamente el estado de facturación: en la inspección anterior `Cloud Billing API` estaba deshabilitada. No se habilitó ninguna API ni se cambió billing.
+
+### Comparación de región
+
+| Criterio | `us-central1` (Iowa) | `southamerica-west1` (Santiago) |
+|---|---|---|
+| Compatibilidad de Storage/Firebase | Ubicación oficial disponible para un bucket Firebase nuevo. Es una de las tres regiones de `*.firebasestorage.app` elegibles para las cuotas sin costo publicadas por Firebase. La elegibilidad específica del proyecto debe confirmarse al crear. | Ubicación oficial de Cloud Storage disponible para Firebase; no es elegible para esas cuotas sin costo. La elegibilidad específica del proyecto debe confirmarse al crear. |
+| Frontend/usuarios en Bolivia | Más distancia geográfica; puede aumentar la latencia de cargas y lecturas comparada con Santiago. No se midió RTT ni tiempo de carga real desde Bolivia. | Geográficamente más cercano a Bolivia; razonablemente favorece latencia de acceso desde usuarios regionales, pero la diferencia real depende de ISP, peering y ruta. No se midió. |
+| Firestore `nam5` | Región compatible con la topología norteamericana de Firestore; reduce el riesgo de una ida y vuelta intercontinental en transacciones de reserva/finalización. `nam5` sigue siendo una ubicación multirregional, no una región idéntica a Iowa. | Firestore queda en Norteamérica; cada reserva/finalización que lee o escribe Firestore cruza regiones, agregando latencia y posible transferencia de red. |
+| Functions | Las Functions v2 actuales están declaradas en `us-central1`; región oficialmente soportada para 1.ª y 2.ª gen con tarifa Tier 1. Bucket y Function quedan en la misma región para iniciar sesiones, descargar/verificar bytes y cambiar metadata. | Functions `southamerica-west1` está soportada solo para 2.ª gen y es Tier 2. Para evitar el cruce bucket-Function habría que mover ambas Functions a Santiago y especificar la región también en el SDK web; Firestore `nam5` quedaría remoto. El código local actual no hace ese cambio. |
+| Transferencia/costos | Los GB públicos servidos a Internet se cotizan según ubicación y destino, pero el bucket puede recibir las cuotas Firebase sin costo descritas abajo. Mantener el backend en Iowa evita trasladar hasta 10 MB por finalización entre Storage y Function. | No hay cuota sin costo Firebase para almacenamiento/descargas/operaciones de ese bucket. Si Functions permanecen en Iowa, la verificación de cada objeto cruza regiones; si se mueven a Santiago, la transacción Firestore cruza regiones. Esos componentes de red deben evaluarse en la calculadora vigente. |
+| Seguridad y consistencia | La ubicación no cambia Firebase Auth, Rules, claims, SHA-256 ni la precondición de generación. Cloud Storage conserva consistencia fuerte; se mantiene un bucket regional. | Los mismos controles y consistencia. La región no corrige ni debilita las reglas. Sigue siendo un bucket regional, no una réplica multirregional. |
+| Disponibilidad/operación | Cloud Functions es redundante dentro de sus zonas regionales; el bucket regional queda sujeto a la disponibilidad de su región. Se alinea con la región ya explícita en el código y simplifica soporte. | También Functions v2 regional, pero solo 2.ª gen y Tier 2; cambiar Functions exige despliegue coordinado y cambio del cliente. Sigue siendo regional. Se debe evaluar plan de recuperación independiente. |
+
+### Cálculo comparativo de Storage y transferencia
+
+Firebase publica para los buckets `*.firebasestorage.app` las cuotas mensuales sin costo siguientes, **solo** en `us-central1`, `us-east1` y `us-west1`: 5 GB-month almacenados, 100 GB descargados, 5.000 operaciones de carga y 50.000 operaciones de descarga. En otras ubicaciones aplica el precio regular de Cloud Storage desde el primer uso. Las cuotas se agregan según las condiciones publicadas por Firebase y pueden estar sujetas a cambios; no se asumió que la cuenta del proyecto tenga saldo promocional ni descuentos particulares.
+
+Los escenarios de almacenamiento siguientes suponen que el promedio retenido durante todo el mes es el valor indicado, en GB-month. “Facturable” expresa volumen después de la cuota, **no dólares**:
+
+| Promedio almacenado | `us-central1`: incluido / facturable | `southamerica-west1`: incluido / facturable |
+|---:|---:|---:|
+| 10 GB-month | 5 / 5 GB-month | 0 / 10 GB-month |
+| 50 GB-month | 5 / 45 GB-month | 0 / 50 GB-month |
+| 100 GB-month | 5 / 95 GB-month | 0 / 100 GB-month |
+
+Escenarios de descarga a clientes por mes (1 TB se define aquí como 1.000 GB decimales):
+
+| Descarga mensual | `us-central1`: cuota / volumen facturable | `southamerica-west1`: cuota / volumen facturable |
+|---:|---:|---:|
+| 500 GB | 100 / 400 GB | 0 / 500 GB |
+| 1 TB (1.000 GB) | 100 / 900 GB | 0 / 1.000 GB |
+
+El costo en USD debe calcularse como `GB-month facturables × tarifa Standard regional de Storage` más `GB de salida facturables × tarifa de transferencia aplicable al destino Bolivia`, más cargos de operaciones. Para Santiago se usan los volúmenes íntegros al no haber cuota Firebase sin costo. No se incluye la transferencia interna entre bucket y Function ni el tráfico de Firestore, que dependen de la arquitectura/región elegida. No se presentan importes en USD porque la página oficial remite los precios efectivos del bucket nuevo a las tablas regionales de Cloud Storage y la tarifa de salida depende también del destino/tipo de transferencia; no se pudo verificar en esta revisión una tarifa vigente única aplicable al bucket y a los usuarios de Bolivia. No se aplican los precios publicados para buckets heredados `*.appspot.com` a este bucket nuevo.
+
+Los cargos de operaciones dependen del número y clase de llamadas (por ejemplo, creación de sesión, carga de objeto, lectura/descarga, metadatos y listados), no solo del tamaño almacenado o descargado. Sin cantidad mensual de cargas, lecturas/listados y objetos no existe una cifra completa de operaciones. Para el bucket US, los primeros 5.000 uploads y 50.000 downloads/mes quedan dentro de las cuotas listadas; en Santiago se aplican las tarifas de operaciones GCS desde el inicio. La Function agrega sus invocaciones, tiempo CPU/memoria, red saliente, Cloud Build, Artifact Registry y Cloud Logging; Functions tiene cuotas sin costo y precios que varían por región, pero no se calculan aquí sin tasa de llamadas, duración/recursos, volúmenes cruzados y precios vigentes por SKU.
+
+### Decisión recomendada
+
+**Recomendación definitiva para el primer bucket: `us-central1`**, manteniendo Firestore en `nam5` y ambas Functions en `us-central1`.
+
+La decisión no se basa solo en la distancia al usuario. Considera que:
+
+1. Este bucket nuevo recibe las cuotas Firebase publicadas para almacenamiento, descargas y operaciones; `southamerica-west1` no.
+2. Las Functions locales ya están configuradas en Iowa y hacen operaciones de Storage y Firestore durante carga/finalización. Mantener Storage/Functions juntas evita una transferencia regional de los bytes al calcular SHA-256.
+3. Firestore permanece en `nam5`; trasladar Functions a Santiago intercambiaría el cruce Storage-Function por cruces de cada reserva/transacción con Firestore y añade tarifa Tier 2 para Functions v2.
+4. Santiago puede ofrecer mejor latencia para Bolivia, especialmente en lectura pública de medios; sin mediciones de red/ISP ni coste de egress comparable no hay evidencia suficiente de que esa ganancia compense perder cuotas y dispersar el backend.
+5. La elección de región de un bucket es irreversible por configuración normal. No crear hasta que el propietario confirme billing, política de ubicación y entienda el costo si el consumo excede las cuotas.
+
+Este es el lugar recomendado para iniciar el servicio bajo el patrón de uso y código actuales; no garantiza que sea el costo mínimo para 500 GB–1 TB de tráfico a Bolivia. Antes de superar el nivel de prueba, cargar mediciones de consumo/rutas reales en Google Cloud Pricing Calculator y comparar la tarifa efectiva de salida Iowa→Bolivia frente a Santiago→Bolivia. Si la latencia pública es crítica, medir descargas desde los ISP principales antes de reconsiderar región o una estrategia de CDN. No se recomienda mover Functions a Santiago sin una migración coordinada y estimación de Firestore interregional.
+
+### Requisitos, APIs y costos adicionales
+
+Firebase Storage nuevo requiere proyecto asociado al plan Blaze/pago por uso, método/cuenta de facturación válida y permisos para provisionar el bucket. El estado de billing actual no se pudo consultar. El bucket debe crearse desde Firebase Console con el nombre requerido y la ubicación elegida; su ubicación no podrá cambiarse después. Para desplegar Functions de segunda generación se requiere facturación Blaze y permisos de despliegue sobre Functions, Cloud Run, IAM/Service Accounts, Eventarc, Artifact Registry y Cloud Build, además de habilitar los servicios necesarios. Con base en la inspección previa de solo lectura, se requiere revisar/habilitar antes de desplegar:
+
+- `firebasestorage.googleapis.com`
+- `cloudfunctions.googleapis.com`
+- `run.googleapis.com`
+- `artifactregistry.googleapis.com`
+- `cloudbuild.googleapis.com`
+- `eventarc.googleapis.com`
+- `iam.googleapis.com`
+
+`storage.googleapis.com`, `firestore.googleapis.com`, `firebase.googleapis.com`, `firebaserules.googleapis.com` y `serviceusage.googleapis.com` figuraban habilitadas. Volver a consultar estado antes de cualquier cambio; no ejecutar habilitaciones en esta intervención. Costos adicionales posibles: almacenamiento y operaciones GCS, descarga a usuarios, transferencia interregional de Storage/Functions/Firestore, ejecución de Functions/Cloud Run, builds e imágenes Artifact Registry, Cloud Logging y lecturas/escrituras Firestore de las reservas. Las cuotas de nivel gratuito no equivalen a precio garantizado ni eliminan los costos después de agotarse.
+
+### Validación final de concurrencia
+
+Se repitió la suite completa con Firebase CLI `15.36.0` en JDK 21 temporal y el proyecto `demo-radio-rules`:
+
+```powershell
+npx --yes firebase-tools@15.36.0 emulators:exec --project demo-radio-rules --only auth,firestore,storage,functions "node --test --test-concurrency=1 scripts/firestore-rules.emulator.mjs scripts/storage-rules.emulator.mjs scripts/media-functions.emulator.mjs"
+```
+
+Resultado real: **25/25 aprobadas** — Firestore Rules 17/17, Storage Rules 2/2 e integración Auth + Functions + Storage + Firestore 6/6. Incluye la prueba concurrente de dos payloads diferentes bajo el mismo ID: solo una reserva obtiene una transferencia confirmada en Emulator; se comprueban bytes y registro coherente. No se modificó código en esta intervención. Esta prueba no valida la precondición de generación contra GCS real, ni demuestra costos/latencia de producción, porque el bucket no existe.
+
+### Siguiente etapa — comandos propuestos, no ejecutados
+
+Primero confirmar facturación Blaze, ubicación permitida por política y aceptación de costos; después crear el bucket predeterminado desde Firebase Console en `us-central1` y verificar su nombre/ubicación. Actualizar la lista de APIs contra el estado vigente; con aprobación, habilitar únicamente las que falten:
+
+```powershell
+gcloud services enable firebasestorage.googleapis.com cloudfunctions.googleapis.com run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com eventarc.googleapis.com iam.googleapis.com --project radio997-d5380
+```
+
+Luego publicar solo las dos Functions multimedia:
+
+```powershell
+npx --yes firebase-tools@15.36.0 deploy --only functions:finalizeMediaUpload,functions:setMediaState --project radio997-d5380
+```
+
+Tras desplegar Functions y actualizar Render a la versión que usa sesiones de carga, publicar exclusivamente Storage Rules, coordinando el bloqueo de escrituras directas para no dejar activo el frontend antiguo:
+
+```powershell
+npx --yes firebase-tools@15.36.0 deploy --only storage --project radio997-d5380
+```
+
+No usar `firebase deploy` general. No desplegar Firestore Rules ni índices. Verificar el flujo con una cuenta autorizada y revisar costos/operaciones antes de carga real. Ninguno de los comandos fue ejecutado.
+
+### Estado final
+
+No se creó bucket, no se habilitaron APIs, no se modificó facturación ni recursos/datos productivos; no se desplegó Rules, Functions o Render, no se migraron medios y no se hizo commit/push. No se midió latencia desde Bolivia ni se pudo confirmar políticas de ubicación o billing del proyecto.
+
+**DECISIÓN RECOMENDADA: `us-central1` para Storage, manteniendo Firestore `nam5` y Functions v2 `us-central1`.** Es la opción mejor sustentada para la arquitectura actual por cuotas Firebase, proximidad entre backend y almacenamiento, menor dispersión hacia Firestore y simplicidad operativa. La decisión es recomendación de configuración, no autorización para provisionar: confirmar billing/ubicación y estimar egress real antes de crear el bucket.
+
+## Intervención de habilitación de Firebase Storage en producción
+
+### Verificaciones previas
+
+- Proyecto activo confirmado: `radio997-d5380`, número `527560734998`.
+- Facturación Blaze reportada como habilitada y vinculada; no se modificó.
+- La cuenta activa tiene un vínculo directo `roles/owner` en el proyecto.
+- La política efectiva de ubicaciones consultada previamente no excluía `us-central1`.
+- El bucket exacto `radio997-d5380.firebasestorage.app` no existía antes de la intervención (404).
+- Las siete APIs autorizadas estaban deshabilitadas y disponibles para habilitación.
+
+### Cambios realizados y resultado
+
+Se habilitaron únicamente las siete APIs expresamente autorizadas:
+
+```text
+firebasestorage.googleapis.com
+cloudfunctions.googleapis.com
+run.googleapis.com
+artifactregistry.googleapis.com
+cloudbuild.googleapis.com
+eventarc.googleapis.com
+iam.googleapis.com
+```
+
+La verificación posterior confirma que las siete aparecen habilitadas. Habilitar APIs no crea por sí solo recursos facturables; el uso posterior de Storage, Functions/Cloud Run, Cloud Build, Artifact Registry y otros servicios puede generar cargos según consumo.
+
+La creación del bucket exacto se intentó en `us-central1`, con clase `STANDARD`, acceso uniforme a nivel de bucket y prevención de acceso público. Google Cloud rechazó la operación con HTTP 403 indicando que otra cuenta reclama el dominio `radio997-d5380.firebasestorage.app`. Una comprobación posterior volvió a obtener 404 para el bucket en este proyecto; el inventario del proyecto no muestra buckets. No se creó un bucket alternativo.
+
+### Límites y estado de seguridad
+
+- El bucket no está provisionado, por lo que su ubicación y controles de acceso no se pudieron verificar como configuración creada.
+- La solicitud fallida no creó recursos de almacenamiento ni objetos.
+- No se ejecutó ningún despliegue de Firestore Rules, Storage Rules, Functions o Render; no se ejecutaron migraciones ni se crearon documentos/archivos de prueba.
+- No se modificaron las Rules ni la facturación. La lectura directa de metadatos de releases de Firebase Rules recibió HTTP 403, así que el estado activo de Rules no se pudo volver a inspeccionar por esa API; la confirmación de no modificación corresponde a que no se ejecutó operación de escritura/despliegue.
+- No se modificaron otros buckets.
+
+### Bloqueo y siguiente paso requerido
+
+La creación queda bloqueada hasta resolver la reclamación global del nombre. No intentar crear un bucket alternativo ni verificar un dominio por cuenta propia como atajo. El propietario del dominio/cuenta debe investigar la titularidad indicada por Google y, tras resolverla, volver a verificar el nombre y crear el bucket predeterminado desde el flujo de Firebase Storage. Después se deben comprobar nombre, región, prevención de acceso público y asociación con Firebase antes de desplegar Rules o Functions.
+
+**Resultado de esta intervención:** APIs habilitadas; bucket no creado; ningún despliegue ni cambio de facturación realizado.
+
+## Verificación posterior a la creación manual de Firebase Storage
+
+Verificación de solo lectura realizada el 2026-11-12. Esta sección actualiza el estado de la intervención anterior: Firebase Console creó después el bucket predeterminado.
+
+### Bucket y asociación con Firebase
+
+Cloud Storage identifica `radio997-d5380.firebasestorage.app` dentro del proyecto consultado `radio997-d5380` (número `527560734998`), región `US-CENTRAL1`, tipo `region`. La metadata del bucket indica clase de almacenamiento `REGIONAL`, acceso uniforme a nivel de bucket **desactivado** y prevención de acceso público `inherited`. No hay una propiedad `cors` configurada en la respuesta del bucket. La ACL de bucket contiene únicamente los grupos de propietarios, editores y lectores del proyecto; no contiene `allUsers` ni `allAuthenticatedUsers`.
+
+Firebase CLI identifica `radio997-d5380` como proyecto Firebase y muestra la etiqueta `firebase/storage-default-bucket=created`. La API Firebase Rules muestra además el release de Storage llamado `projects/radio997-d5380/releases/firebase.storage/radio997-d5380.firebasestorage.app`, asociado al mismo nombre de bucket. En conjunto, la metadata Firebase y el bucket listado por Google Cloud corresponden al bucket predeterminado esperado.
+
+Las siete APIs autorizadas se verificaron habilitadas: `firebasestorage.googleapis.com`, `cloudfunctions.googleapis.com`, `run.googleapis.com`, `artifactregistry.googleapis.com`, `cloudbuild.googleapis.com`, `eventarc.googleapis.com` e `iam.googleapis.com`. No se habilitaron APIs adicionales en esta intervención.
+
+**Observación de seguridad:** no hay ACL pública, pero el acceso uniforme está desactivado y la prevención de acceso público aparece como `inherited`, no como una imposición explícita a nivel de bucket. La consulta de Organization Policy no pudo completarse porque `orgpolicy.googleapis.com` está deshabilitada; no se habilitó para esta verificación. Se debe revisar la política efectiva y decidir sobre UBLA/PAP antes de producción, en una intervención autorizada aparte.
+
+### Storage Rules activas frente a las locales
+
+Se leyó el release activo de Firebase Storage (`ruleset 68c627fb-2203-4205-91a3-f4875b857ad8`). Su contenido actual deniega todas las lecturas y escrituras. No coincide con [`storage.rules`](../storage.rules):
+
+- Las Rules locales permiten leer medios con `visibility == 'public'` y permiten lectura autenticada a superadministradores que tengan `email_verified == true` y `superadmin == true`.
+- Las Rules locales deniegan **todas** las escrituras directas desde clientes, incluidos superadministradores; por ello las cargas deben pasar por Functions, que exige superadministrador con correo verificado y valida UID, ruta, hash, tamaño, reserva e integridad.
+- El release activo también deniega todas las escrituras, pero deniega además las lecturas públicas y administrativas permitidas localmente.
+
+El release activo es restrictivo, pero no corresponde a la política local y puede impedir las lecturas de medios desde el cliente. No se modificaron ni desplegaron Rules.
+
+### Functions y frontend
+
+[`functions/index.mjs`](../functions/index.mjs) inicializa Admin Storage con `MEDIA_STORAGE_BUCKET` si está configurado; si no, usa `${GCLOUD_PROJECT}.firebasestorage.app`, que para este proyecto produce el bucket verificado. `finalizeMediaUpload` y `setMediaState` están declaradas explícitamente en `us-central1`. El código de operaciones exige identidad superadministradora verificada y usa reserva transaccional, sesión resumible con `ifGenerationMatch: 0`, ruta `media/<UUID>` y comprobación SHA-256 antes de registrar/publicar.
+
+La aplicación local obtiene el bucket exclusivamente de `VITE_FIREBASE_STORAGE_BUCKET`. En este entorno no hay archivo `.env` local de producción y la variable de proceso no está definida; `.env.example` la deja vacía. Por eso el build local comprobado no puede considerarse configurado para producción. `node scripts/check-production-config.mjs radio997-d5380` falló correctamente indicando que faltan las seis variables obligatorias de Firebase; no se imprimieron valores de credenciales.
+
+Render respondió HTTP 200 y sirvió el entry asset `index-DMZJ82k_.js`. Se inspeccionaron los 29 assets JavaScript referenciados por ese bundle y no se encontraron los marcadores `finalizeMediaUpload`, `setMediaState` ni `createResumableUpload`. El build local actualizado genera `index-DwYNaUJC.js` y contiene los marcadores de las Functions multimedia en los chunks de administración/medios. Esto confirma que Render aún sirve la versión anterior de frontend.
+
+### Pruebas ejecutadas
+
+| Comprobación | Resultado |
+|---|---|
+| `npm test` | **41/41 aprobadas** |
+| `npm --prefix functions test` | **9/9 aprobadas** |
+| Firestore Rules Emulator | **17/17 aprobadas** |
+| Storage Rules Emulator | **2/2 aprobadas** |
+| Integración Auth + Functions + Firestore + Storage Emulator | **6/6 aprobadas** |
+| Suite completa de emuladores | **25/25 aprobadas**; incluye concurrencia y coherencia de bytes/hash/registro |
+| `npm run typecheck` | Aprobado |
+| `npm run build` | Aprobado; Vite generó el bundle local actualizado |
+| `npm run lint` (Oxlint) | Exit code 0; reportó advertencias de React/hooks ya existentes |
+| `npm run lint -- --deny-warnings` | No aprobado: las advertencias existentes se elevan a error; no se cambiaron archivos ajenos a esta tarea |
+| `git diff --check` | Aprobado |
+| `node scripts/check-production-config.mjs radio997-d5380` | No aprobado: faltan las variables de configuración de producción; bloqueo esperado en este entorno |
+
+La suite de emuladores se ejecutó en el proyecto ficticio `demo-radio-rules` con JDK 21; no creó datos de producción.
+
+### Procedimiento preparado; no ejecutado
+
+Orden recomendado: (1) revisar UBLA/PAP/CORS y aprobar las Rules locales que reemplazarían el release deny-all; (2) configurar/verificar el entorno de build de Render con el bucket exacto y los valores de la aplicación Firebase; (3) desplegar solo las dos Functions; (4) desplegar solo Storage Rules; (5) publicar el frontend nuevo en Render y hacer pruebas con usuarios autorizados. No continuar a publicación del frontend si la configuración de producción está incompleta o si las Rules aprobadas no permiten la lectura de medios requerida.
+
+Desplegar exclusivamente las Functions multimedia:
+
+```powershell
+npx --yes firebase-tools@15.36.0 deploy --only functions:finalizeMediaUpload,functions:setMediaState --project radio997-d5380
+```
+
+Publicar exclusivamente Storage Rules, luego de aprobarlas:
+
+```powershell
+npx --yes firebase-tools@15.36.0 deploy --only storage --project radio997-d5380
+```
+
+Para Render, revisar en el Dashboard las variables `VITE_FIREBASE_PROJECT_ID=radio997-d5380`, `VITE_FIREBASE_STORAGE_BUCKET=radio997-d5380.firebasestorage.app`, las demás variables de la app web Firebase, `VITE_USE_FIREBASE_EMULATORS=false` y `VITE_SITE_URL` igual al origen canónico HTTPS. Después de que el commit autorizado llegue a la rama conectada, ejecutar **Manual Deploy → Deploy latest commit** en el Static Site existente `radiocontinental99-7`, cuyo `render.yaml` publica `dist` mediante `npm ci --include=dev && npm run deploy:prepare`. Verificar los markers de Functions en los nuevos assets y el flujo de medios; no desplegar Firebase Hosting.
+
+No se ejecutaron los dos comandos de Firebase ni se solicitó un deploy de Render. No se subieron archivos ni se crearon documentos de producción, no se modificaron Firestore Rules, no se migraron medios y no se hizo commit/push.
+
+## Auditoría final de seguridad y preparación de despliegue multimedia
+
+Revisión de solo lectura y suites locales repetidas el 2026-11-12. Ninguna sección de este plan autoriza cambios productivos; no se modificaron UBLA, ACL, CORS, Rules, Functions, Render ni datos.
+
+### UBLA y dependencias de ACL
+
+- El bucket reporta `uniform_bucket_level_access=false`. El inventario actual del bucket contiene **0 objetos**.
+- La ACL de bucket contiene únicamente los grupos de proyecto de owners, editors y viewers; no se observaron grants `allUsers` ni `allAuthenticatedUsers`.
+- La búsqueda del código de aplicación, Functions y scripts no encontró operaciones de ACL (`makePublic`, `makePrivate`, `acl`, `predefinedAcl`, etc.). El navegador usa Firebase SDK + Firebase Storage Rules; las Functions usan Admin SDK/Google credentials, cuyo acceso debe concederse mediante IAM. No se encontró un proceso actual ni objeto que dependa de ACL por objeto.
+- La documentación oficial diferencia las solicitudes Firebase SDK, autorizadas por Firebase Authentication/Storage Rules, de operaciones directas con Google Cloud Storage, que usan IAM/ACL. El patrón local no hace llamadas GCS desde el navegador que dependan de ACL. En principio, UBLA es compatible con el flujo implementado si la cuenta de ejecución de Functions dispone de los permisos IAM de objeto necesarios y no se introduce un cliente GCS externo dependiente de ACL.
+- Riesgo irreversible: Cloud Storage desactiva ACL al activar UBLA; después de 90 días consecutivos no se puede volver a desactivarlo. Aunque no hay objetos ni dependencia ACL hallada, antes de aplicarlo hay que confirmar el IAM efectivo del service account que ejecutará las Functions y conservar el estado actual. No se activó UBLA.
+
+Comando preparado, **no ejecutado**:
+
+```powershell
+gcloud storage buckets update gs://radio997-d5380.firebasestorage.app --uniform-bucket-level-access --project radio997-d5380
+```
+
+Reversa posible solo antes de completar 90 días (confirmar que ninguna dependencia ACL haya aparecido):
+
+```powershell
+gcloud storage buckets update gs://radio997-d5380.firebasestorage.app --no-uniform-bucket-level-access --project radio997-d5380
+```
+
+Fuentes oficiales: [Firebase Storage y Google Cloud](https://firebase.google.com/docs/storage/gcp-integration) y [Uniform bucket-level access](https://cloud.google.com/storage/docs/uniform-bucket-level-access).
+
+### Storage Rules y alineación con Firestore
+
+El archivo local [`storage.rules`](../storage.rules) completo:
+
+- Reconoce un superadministrador solo cuando hay sesión, `email_verified == true` y `superadmin == true`.
+- En `media/{fileName}`, permite lectura al superadministrador verificado o si metadata `visibility == 'public'`.
+- Deniega toda escritura en esa ruta; la regla catch-all deniega lectura/escritura en el resto del bucket. Así no se permiten cargas, sobrescrituras, cambios de metadata ni borrados directos por clientes, incluidos superadministradores.
+- La ruta real de archivos nuevos es exactamente `media/<UUIDv4>` y el documento asociado es `media/<mismo UUID>`. Finalización valida UID/ruta/reserva y SHA-256 antes de crear el documento; el estado multimedia valida el objeto y su ruta antes de cambiar metadata/Firestore. `firestore.rules` además limita `storagePath` a `media/<segmento>`.
+- El cliente lee medios privados con cuenta superadministradora y medios públicos mediante `getBlob`. Los cambios de estado solo se realizan a través de `setMediaState`.
+
+El release activo de producción se verificó otra vez: actualmente deniega **todas** las lecturas y escrituras. No coincide con las reglas locales. Esto mantiene bloqueadas las escrituras directas, pero también bloquea las lecturas públicas y administrativas de Storage. No se publicó ninguna regla.
+
+Casos de prueba de permisos para exigir antes/después de publicar reglas:
+
+| Caso | Resultado esperado con reglas locales |
+|---|---|
+| Anónimo lee objeto con `visibility=public` en `media/<id>` | Permitir |
+| Anónimo lee objeto privado | Denegar |
+| Superadministrador con correo verificado lee objeto privado/público | Permitir |
+| Editor, usuario ordinario o superadministrador no verificado lee objeto privado | Denegar |
+| Cualquier usuario cliente intenta upload directo, incluido upload resumible | Denegar |
+| Cliente intenta sobreescribir objeto, cambiar metadata o borrar | Denegar |
+| Cualquier cliente lee/escribe fuera de `media/` | Denegar |
+| Objeto y documento/media ID/ruta/metadata no coinciden | Finalización/Functions deben denegar o no registrar |
+| Hash, UID, UUID o propietario no coincide | Functions deben denegar y no registrar |
+
+La suite Storage Rules actual cubre lectura pública/privada, lectura superadmin, y denegación de upload, overwrite, metadata update y delete; no tiene casos separados para editor y claim superadmin no verificado. La suite Functions/integración cubre autenticación, verificación, rol, UID, hash, colisiones y ruta. Añadir los dos casos de Rules indicados a la matriz de Emulator antes de considerar completa la cobertura sería recomendable; no se alteraron pruebas ni reglas en esta intervención.
+
+Límite de consistencia a considerar: Storage Rules autorizan lectura pública por metadata `visibility`, no consultando el estado del documento Firestore. `setMediaState` cambia primero la metadata de Storage y después hace la transacción Firestore, con compensación a privado si falla. Hay una ventana breve en la que el objeto puede ser legible antes de que Firestore confirme `published`; si la transacción y la compensación fallan, la Function devuelve error, pero hace falta intervención para comprobar el estado real. Las pruebas verifican el resultado final/compensación, no ausencia de esa ventana temporal. No se publicó ni cambió el código.
+
+### CORS y protocolo real del cliente
+
+El flujo usa ambos servicios, con roles distintos:
+
+1. Firebase Storage SDK: el cliente consulta metadata y verifica bytes mediante `getMetadata()` y `getBlob()` en el host de Firebase Storage. La documentación de Firebase indica expresamente que `getBlob()` en navegador requiere configurar CORS en el bucket.
+2. Cloud Functions callable: el cliente solicita una URL/sesión a `finalizeMediaUpload` (acción `start`); esta llamada no es una carga al bucket ni se autoriza mediante su CORS.
+3. Sesión resumible GCS: el Admin SDK crea la sesión y el navegador hace `PUT` directo a la URL de `storage.googleapis.com`, con `Content-Type` y `Content-Range`. Por método y encabezados no simples, el navegador debe hacer preflight `OPTIONS`.
+4. Finalización vuelve a invocar la callable `finalizeMediaUpload` para validar bytes/hash y crear el documento. `setMediaState` también es una callable, no una operación cliente directa al bucket.
+
+Por tanto, sí hay evidencia en código y en documentación oficial para preparar CORS de bucket. No se envió una petición OPTIONS productiva ni se cambió CORS. La metadata del bucket no informa una configuración CORS activa.
+
+La aplicación canónica es `https://continental997.fm`. `https://www.continental997.fm` redirige al apex y no necesita su propia entrada si el redirect se conserva. Render actualmente sirve desde `https://radiocontinental99-7.onrender.com`; incluirlo temporalmente evita bloquear llamadas del panel si se accede por ese host. CORS candidato, **archivo de preparación solamente**, sin wildcard:
+
+```json
+[
+  {
+    "origin": [
+      "https://continental997.fm",
+      "https://radiocontinental99-7.onrender.com"
+    ],
+    "method": ["GET", "PUT"],
+    "maxAgeSeconds": 3600
+  }
+]
+```
+
+`GET` corresponde a metadata/lectura directa (`getMetadata`, `getBlob`); `PUT` corresponde a la transferencia resumible personalizada. `OPTIONS` es el preflight que el servicio debe responder, no un método de aplicación que se agrega a la lista. Los encabezados solicitados que se deben observar en `Access-Control-Request-Headers` son los de Firebase SDK (`Authorization`, `X-Firebase-Storage-Version`, `X-Firebase-GMPID`, opcional `X-Firebase-AppCheck`) y, para el PUT resumible, `Content-Type` y `Content-Range`. La configuración CORS de GCS no contiene una propiedad configurable `allowedHeaders`; la comprobación es que la respuesta del preflight autorice los headers solicitados. No se agrega `responseHeader` porque el cliente no lee headers de respuesta personalizados.
+
+Comando preparado, no ejecutado:
+
+```powershell
+gcloud storage buckets update gs://radio997-d5380.firebasestorage.app --cors-file=cors.json --project radio997-d5380
+```
+
+Prueba de navegador para una futura ventana autorizada: en DevTools → Network, cargar la app canónica y abrir un medio público debe mostrar `GET` exitoso; una cuenta superadministradora verificada debe poder cargar la biblioteca privada. Al iniciar una carga de prueba autorizada, observar `OPTIONS` seguido de `PUT` contra la URL de sesión y verificar origen, método y encabezados en la preflight; luego verificar éxito HTTP de PUT, callable de finalización, documento `media/<UUID>` y metadata/hash coincidentes. No ejecutar hasta contar con autorización explícita para subir un objeto productivo; no se hizo esa prueba en esta intervención.
+
+Fuente oficial: [Firebase Storage direct downloads y CORS](https://firebase.google.com/docs/storage/web/download-files#cors_configuration) y [Cloud Storage CORS](https://cloud.google.com/storage/docs/cross-origin).
+
+### Render y Functions
+
+En el entorno local no están presentes las ocho variables requeridas para producción:
+
+```text
+VITE_FIREBASE_API_KEY
+VITE_FIREBASE_AUTH_DOMAIN
+VITE_FIREBASE_PROJECT_ID
+VITE_FIREBASE_STORAGE_BUCKET
+VITE_FIREBASE_APP_ID
+VITE_FIREBASE_MESSAGING_SENDER_ID
+VITE_SITE_URL
+VITE_USE_FIREBASE_EMULATORS
+```
+
+No hay archivos `.env`, `.env.local`, `.env.production` ni `.env.production.local`; no se mostraron valores. La variable de emuladores debe definirse como `false`, no dejarse habilitada.
+
+No hay acceso autenticado al dashboard de Render para consultar sus variables. La versión pública continúa anterior: el bundle servido no contiene identificadores de proyecto/bucket ni los marcadores `finalizeMediaUpload`, `setMediaState` o `createResumableUpload`; el build local sí contiene la implementación multimedia, aunque no se puede certificar como build productivo por falta de variables. No se modificaron variables de Render.
+
+El Static Site existente está descrito por [`render.yaml`](../render.yaml): publica `dist`, con build `npm ci --include=dev && npm run deploy:prepare`. El script valida configuración para el proyecto/origen canónico, compila y genera sitemap que requiere acceso público a Firestore; ejecutar el build exige que esas dependencias/configuración estén preparadas.
+
+[`functions/index.mjs`](../functions/index.mjs) declara ambas Functions en `us-central1` y selecciona `MEDIA_STORAGE_BUCKET` o `${GCLOUD_PROJECT}.firebasestorage.app`. Con `GCLOUD_PROJECT=radio997-d5380` y sin override, selecciona el bucket verificado. [`functions/src/media-operations.mjs`](../functions/src/media-operations.mjs) comprueba superadmin y correo verificado, reserva transaccional de ID/payload, UID/ruta, UUIDv4, tamaño/tipo y SHA-256; crea sesión resumible con `ifGenerationMatch: 0`, revalida bytes del objeto antes de registrar, hace finalización/idempotencia y compensa metadata a privado ante fallo de transacción al cambiar estado. El objeto Firestore es `media/<operationId>`, el Storage path `media/<operationId>` y el log `adminLogs/media-<operationId>`.
+
+La lista de Functions de producción está vacía; no hay `finalizeMediaUpload` ni `setMediaState` desplegadas. Comando preparado para desplegar exclusivamente las dos:
+
+```powershell
+npx --yes firebase-tools@15.36.0 deploy --only functions:finalizeMediaUpload,functions:setMediaState --project radio997-d5380
+```
+
+### Pruebas ejecutadas en esta intervención
+
+| Comprobación | Resultado |
+|---|---|
+| `npm test` | **41/41 aprobadas** |
+| `npm --prefix functions test` | **9/9 aprobadas** |
+| Firestore Rules Emulator | **17/17 aprobadas** |
+| Storage Rules Emulator | **2/2 aprobadas** |
+| Integración Auth + Functions + Firestore + Storage Emulator | **6/6 aprobadas** |
+| Suite completa Emulator | **25/25 aprobadas**; incluye concurrencia y retries/idempotencia |
+| `npm run typecheck` | Aprobado |
+| `npm run build` | Aprobado |
+| `npm run lint` (Oxlint) | Exit code 0; imprime advertencias React/hooks preexistentes |
+| `git diff --check` | Aprobado |
+
+Las pruebas usan solo `demo-radio-rules` y emuladores locales; no validan UBLA, CORS, IAM de runtime, Rules activas, Functions productivas, variables del dashboard ni la operación real en el bucket. No se marcó ninguna de esas comprobaciones como probada.
+
+### Orden de despliegue propuesto y reversión
+
+El orden necesario para evitar exponer una interfaz nueva sin backend/reglas es:
+
+1. **Infraestructura (aprobación separada):** guardar metadata actual y CORS vacío, confirmar permisos del service account de Functions, activar UBLA solo tras aceptar su ventana irreversible de 90 días, y aplicar/validar CORS propuesto. No tocar ACL manualmente, Firestore Rules ni datos.
+2. **Functions:** desplegar solo `finalizeMediaUpload` y `setMediaState`; revisar estado/región en consola y confirmar que ambas usan el bucket default. El inventario actual está vacío, por lo que no hay endpoints productivos anteriores a los que hacer rollback. Ante fallo, no publicar el frontend; corregir y redesplegar la versión validada.
+3. **Storage Rules:** publicar solo `storage.rules` local después de aprobación, restaurando lecturas pública/admin mientras mantiene `allow write: if false`. Hasta que llegue el frontend nuevo, cualquier cliente antiguo que intente escritura directa seguirá denegado (igual que con el release actual deny-all).
+4. **Frontend Render:** configurar en el servicio existente las seis variables `VITE_FIREBASE_*` con valores de la app web correcta, `VITE_SITE_URL=https://continental997.fm`, `VITE_USE_FIREBASE_EMULATORS=false`; revisar que las variables estén presentes sin registrarlas en logs, y hacer Manual Deploy del commit/build aprobado en Static Site `radiocontinental99-7`. No usar Firebase Hosting. La UI nueva depende de los dos callables y del nuevo flujo.
+5. **Pruebas funcionales productivas (aprobación explícita de carga):** revisar OPTIONS/GET/PUT y los headers permitidos; usar un objeto pequeño autorizado y un superadmin verificado; completar sesión, verificar hash y documento, probar lectura pública/privada y cambios publish/unpublish/archive; archivar/limpiar el objeto de prueba según el procedimiento aprobado. Si cualquier etapa falla, parar nuevas cargas y preservar evidencia sin exponer tokens/URL de sesión.
+
+Reversiones preparadas:
+
+- **CORS:** restaurar el archivo de CORS anterior (actualmente vacío) con `gcloud storage buckets update gs://radio997-d5380.firebasestorage.app --clear-cors --project radio997-d5380`; esto puede volver a romper `getBlob` desde navegador.
+- **UBLA:** dentro de los primeros 90 días, evaluar y usar `--no-uniform-bucket-level-access`; después de 90 días consecutivos no es reversible. No cambiar ACL para simular una reversión.
+- **Functions:** como no hay versión anterior desplegada, evitar borrar endpoints automáticamente. Si fallan antes de publicar frontend, mantener el deploy de frontend detenido; corregir y redesplegar ambas desde código revisado. Si ya hay frontend nuevo, revertir primero Render para evitar llamadas incompatibles.
+- **Storage Rules:** restaurar la fuente deny-all activa guardada solo ante incidente de seguridad, entendiendo que bloquea toda lectura de medios. Coordinar con rollback de Render y no usarla como rollback normal del frontend.
+- **Render:** desde el Dashboard del Static Site, volver al deploy anterior conocido; validar nuevamente assets. El bundle anterior no soporta las Functions ni carga resumible y las Rules actuales niegan writes directos, así que el rollback restablece una interfaz anterior, pero no restaura capacidad de carga multimedia.
+
+**Estado:** solo auditoría y documentación. No se cambiaron UBLA, ACL o CORS; no se publicaron Storage Rules ni Functions; no se cambiaron Firestore Rules ni Render; no se subieron objetos ni se crearon documentos; no se migraron medios y no se hizo commit/push.
+
+## Intervención de primera publicación controlada multimedia — detenida en preflight
+
+Revisión previa realizada el 2026-11-12. No se ejecutó ninguna escritura de producción porque el árbol contiene cambios locales funcionales sin commit y la intervención exige detenerse si hay cambios no respaldados.
+
+### Estado comprobado
+
+- Proyecto activo y destino confirmados: `radio997-d5380`, número `527560734998`; bucket `radio997-d5380.firebasestorage.app`, `US-CENTRAL1`.
+- El bucket sigue sin CORS declarado, con UBLA desactivado; la metadata visible no se modificó.
+- Inventario del bucket: **0 objetos**.
+- No hay Functions desplegadas en `us-central1`. El source exporta exactamente `finalizeMediaUpload` y `setMediaState`, ambas en `us-central1`; usa `MEDIA_STORAGE_BUCKET` o `${GCLOUD_PROJECT}.firebasestorage.app`.
+- La suite local volvió a pasar: `npm test` **41/41**, `npm --prefix functions test` **9/9**, Emulator completo **25/25**. Los emuladores usan exclusivamente `demo-radio-rules`.
+- El commit local `05605c43f170eb5faca2a56ae96db641f6e778ef` coincide con `origin/backup/media-integration-progress`, pero hay ocho archivos modificados después de ese commit y sin respaldo remoto: `docs/AUDITORIA-INTEGRAL.md`, `functions/index.mjs`, `functions/src/media-operations.mjs`, `functions/test/media-operations.test.mjs`, `scripts/media-functions.emulator.mjs`, `scripts/storage-rules.emulator.mjs`, `src/services/media.ts` y `storage.rules`. Como Functions deploy empaquetaría código local no respaldado y las Rules también están modificadas, se detuvo antes de cualquier cambio productivo. No se hizo commit/push por la restricción expresa.
+- No se pudieron confirmar permisos de un runtime service account real porque no existen Functions desplegadas. El código no fija `serviceAccount`; la identidad default prevista por Cloud Functions v2 sería la cuenta de cómputo `527560734998-compute@developer.gserviceaccount.com`, que aparece habilitada y tiene `roles/editor` en el proyecto. Ese rol es amplio; antes del deploy se debe confirmar la identidad efectiva que escogerá el despliegue y verificar los permisos requeridos de lectura/escritura de objetos en el bucket. No se cambió IAM.
+
+### CORS preparado, no aplicado
+
+El protocolo requiere CORS para `getBlob()` de Firebase Storage en navegador y para el `PUT` resumible GCS. El cliente hace preflight por el método `PUT` y encabezados `Content-Type` y `Content-Range`; las lecturas `GET` del SDK pueden incluir `Authorization`, `X-Firebase-Storage-Version`, `X-Firebase-GMPID` y opcionalmente `X-Firebase-AppCheck`. `OPTIONS` es el preflight que responde GCS, no un método de aplicación que se agrega al archivo CORS. El cliente no requiere headers de respuesta personalizados expuestos. No se incluyó el host de Render: el frontend publicado allí es anterior, y el origen canónico de producción es `https://continental997.fm`.
+
+Política candidata mínima para revisar (sin archivo aplicado ni comando ejecutado):
+
+```json
+[
+  {
+    "origin": ["https://continental997.fm"],
+    "method": ["GET", "PUT"],
+    "maxAgeSeconds": 3600
+  }
+]
+```
+
+El archivo de configuración CORS de GCS no tiene una propiedad `allowedHeaders`; la validación debe comprobar las cabeceras solicitadas y la respuesta real del preflight. Al seguir bloqueada la intervención, no se cambió CORS ni se realizaron preflight de verificación.
+
+Comando preparado, no ejecutado:
+
+```powershell
+gcloud storage buckets update gs://radio997-d5380.firebasestorage.app --cors-file=cors.json --project radio997-d5380
+```
+
+La verificación OPTIONS completa deberá hacerse después de aplicar CORS y tras tener una URL de sesión resumible real; no se puede generar esa sesión de producción actualmente porque las Functions aún no están desplegadas. No se creó sesión, objeto ni documento.
+
+### Estado de la intervención y desbloqueo
+
+No se ejecutó `gcloud storage buckets update`, no se desplegaron Functions, Rules ni frontend; no se modificaron IAM, UBLA, ACL, CORS ni Firestore Rules. La causa de detención es el cambio local sin respaldo requerido por el preflight, junto a la falta de una identidad runtime desplegada cuya política efectiva pueda verificarse. La siguiente etapa requiere respaldar y revisar los cambios locales bajo una autorización de Git independiente, luego repetir `git status` y la comparación remota; confirmar permisos IAM efectivos de la cuenta runtime; recién entonces, con el mismo alcance de autorización de producción, aplicar CORS, verificar preflight y desplegar exclusivamente las dos Functions.

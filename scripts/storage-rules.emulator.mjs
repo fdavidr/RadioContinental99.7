@@ -29,106 +29,55 @@ function authenticatedStorage(uid, claims = {}) {
   return testEnvironment.authenticatedContext(uid, claims).storage()
 }
 
-function uploadOptions(uid, uploadId, contentType = 'image/jpeg') {
-  return {
-    contentType,
-    customMetadata: {
-      visibility: 'private',
-      uploadedBy: uid,
-      uploadId,
-      sha256: 'a'.repeat(64),
-    },
-  }
-}
-
 after(async () => {
   await testEnvironment.cleanup()
 })
 
-test('only verified superadmins can upload supported file types within limits', async () => {
-  const editorStorage = authenticatedStorage('storage-editor', {
-    email_verified: true,
-    editor: true,
-  })
-  const unverifiedStorage = authenticatedStorage('storage-unverified', {
-    email_verified: false,
-    superadmin: true,
-  })
-  const adminStorage = authenticatedStorage('storage-superadmin', {
-    email_verified: true,
-    superadmin: true,
-  })
-
-  await assertFails(uploadBytes(
-    ref(editorStorage, 'media/editor.jpg'),
-    imageBytes,
-    uploadOptions('storage-editor', 'editor.jpg'),
-  ))
-  await assertFails(uploadBytes(
-    ref(unverifiedStorage, 'media/unverified.jpg'),
-    imageBytes,
-    uploadOptions('storage-unverified', 'unverified.jpg'),
-  ))
-  await assertFails(uploadBytes(
-    ref(adminStorage, 'media/script.js'),
-    imageBytes,
-    uploadOptions('storage-superadmin', 'script.js', 'application/javascript'),
-  ))
-  await assertFails(uploadBytes(
-    ref(adminStorage, 'media/oversized.jpg'),
-    new Uint8Array(10 * 1024 * 1024 + 1),
-    uploadOptions('storage-superadmin', 'oversized.jpg'),
-  ))
-  await assertFails(uploadBytes(
-    ref(adminStorage, 'media/nested/file.jpg'),
-    imageBytes,
-    uploadOptions('storage-superadmin', 'nested/file.jpg'),
-  ))
-  await assertSucceeds(uploadBytes(
-    ref(adminStorage, 'media/private.jpg'),
-    imageBytes,
-    uploadOptions('storage-superadmin', 'private.jpg'),
-  ))
-})
-
-test('resumable image uploads complete for JPEG, PNG, and WebP under the existing rules', async () => {
+test('all client uploads are denied, including verified superadmins and resumable uploads', async () => {
   const uid = 'resumable-image-admin'
   const storage = authenticatedStorage(uid, {
     email_verified: true,
     superadmin: true,
   })
 
-  for (const [extension, contentType] of [
-    ['jpg', 'image/jpeg'],
-    ['png', 'image/png'],
-    ['webp', 'image/webp'],
-  ]) {
-    const result = await assertSucceeds(uploadBytesResumable(
-      ref(storage, `media/resumable-${extension}`),
-      imageBytes,
-      uploadOptions(uid, `resumable-${extension}`, contentType),
-    ))
-    assert.equal(result.metadata.contentType, contentType)
-  }
+  await assertFails(uploadBytes(
+    ref(storage, 'media/direct.jpg'),
+    imageBytes,
+    { contentType: 'image/jpeg' },
+  ))
+  await assertFails(uploadBytesResumable(
+    ref(storage, 'media/resumable.jpg'),
+    imageBytes,
+    { contentType: 'image/jpeg' },
+  ))
 })
 
-test('uploads are create-only; clients cannot overwrite, publish, or delete files', async () => {
+test('public files are readable, private files stay private, and clients cannot overwrite or delete', async () => {
   const uid = 'storage-owner'
   const adminStorage = authenticatedStorage(uid, {
     email_verified: true,
     superadmin: true,
   })
   const anonymousStorage = testEnvironment.unauthenticatedContext().storage()
-  const fileName = `${uid}.jpg`
-  const privateRef = ref(adminStorage, `media/${fileName}`)
+  const privateRef = ref(adminStorage, 'media/private.jpg')
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    await uploadBytes(ref(context.storage(), 'media/private.jpg'), imageBytes, {
+      contentType: 'image/jpeg',
+      customMetadata: { visibility: 'private', uploadedBy: uid, uploadId: 'private', sha256: 'a'.repeat(64) },
+    })
+    await uploadBytes(ref(context.storage(), 'media/public.jpg'), imageBytes, {
+      contentType: 'image/jpeg',
+      customMetadata: { visibility: 'public', uploadedBy: uid, uploadId: 'public', sha256: 'a'.repeat(64) },
+    })
+  })
 
-  await uploadBytes(privateRef, imageBytes, uploadOptions(uid, fileName))
-  await assertFails(getBytes(ref(anonymousStorage, `media/${fileName}`)))
+  await assertFails(getBytes(ref(anonymousStorage, 'media/private.jpg')))
+  await assertSucceeds(getBytes(ref(anonymousStorage, 'media/public.jpg')))
+  await assertSucceeds(getBytes(privateRef))
   await assertFails(updateMetadata(privateRef, {
-    customMetadata: { visibility: 'private', uploadedBy: 'another-user' },
+    customMetadata: { visibility: 'public', uploadedBy: uid, uploadId: 'private', sha256: 'a'.repeat(64) },
   }))
   await assertFails(deleteObject(privateRef))
-  await assertFails(uploadBytes(privateRef, imageBytes, uploadOptions(uid, fileName)))
+  await assertFails(uploadBytes(privateRef, imageBytes, { contentType: 'image/jpeg' }))
   assert.deepEqual(new Uint8Array(await getBytes(privateRef)), imageBytes)
-  await assertFails(getBytes(ref(anonymousStorage, `media/${fileName}`)))
 })

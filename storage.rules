@@ -12,37 +12,10 @@ service firebase.storage {
         : false;
     }
 
-    function validContentType(contentType) {
-      return contentType in [
-        'image/jpeg', 'image/png', 'image/webp', 'image/avif',
-        'audio/mpeg', 'audio/aac', 'audio/ogg', 'audio/wav', 'video/mp4'
-      ];
-    }
-
-    function validUpload(fileName) {
-      return request.resource != null
-        && validContentType(request.resource.contentType)
-        && request.resource.size > 0
-        && (
-          (request.resource.contentType.matches('^image/.*')
-            && request.resource.size <= 10485760)
-          || (request.resource.contentType.matches('^audio/.*')
-            && request.resource.size <= 26214400)
-          || (request.resource.contentType == 'video/mp4'
-            && request.resource.size <= 52428800)
-        )
-        && request.resource.metadata.visibility == 'private'
-        && request.resource.metadata.uploadedBy == request.auth.uid
-        && request.resource.metadata.uploadId == fileName
-        && request.resource.metadata.sha256.matches('^[a-f0-9]{64}$');
-    }
-
     match /media/{fileName} {
       allow read: if isSuperadmin()
         || (resource != null && resource.metadata.visibility == 'public');
-      allow create: if isSuperadmin() && resource == null && validUpload(fileName);
-      allow update: if false;
-      allow delete: if false;
+      allow write: if false;
     }
 
     match /{allPaths=**} {

@@ -1,4 +1,4 @@
-import { getBlob, getMetadata, ref, uploadBytesResumable } from 'firebase/storage'
+import { getBlob, getMetadata, ref } from 'firebase/storage'
 import { collection, getCountFromServer, query, where } from 'firebase/firestore'
 import type { User } from 'firebase/auth'
 import { httpsCallable } from 'firebase/functions'
@@ -46,6 +46,8 @@ export type MediaUploadOperation = {
   altText: string
   sha256: string
 }
+
+type FinalizeMediaUploadRequest = MediaUploadOperation & { phase?: 'finalize' }
 
 type MediaStateAction = 'publish' | 'unpublish' | 'archive'
 
@@ -133,52 +135,99 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   ]).finally(() => clearTimeout(timeout))
 }
 
-function waitForUpload(
-  task: ReturnType<typeof uploadBytesResumable>,
+function uploadToResumableSession(
+  uploadUrl: string,
+  file: File,
   onProgress?: (progress: number) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false
-    let timedOut = false
-    let unsubscribe = () => {}
-    const timeout = setTimeout(() => {
-      if (settled) return
-      timedOut = true
-      const cancellationRequested = task.cancel()
-      if (!cancellationRequested && task.snapshot.state !== 'running') {
-        finish(new Error(`La carga superó el límite de ${UPLOAD_TIMEOUT_MS / 1000} segundos.`))
-      }
-    }, UPLOAD_TIMEOUT_MS)
+    const url = new URL(uploadUrl)
+    const usingEmulator = import.meta.env.DEV && import.meta.env.VITE_USE_FIREBASE_EMULATORS === 'true'
+    const allowedHost = usingEmulator
+      ? url.protocol === 'http:' &&
+        ['127.0.0.1', 'localhost'].includes(url.hostname) &&
+        url.port === '9199'
+      : url.protocol === 'https:' && url.hostname === 'storage.googleapis.com'
+    if (
+      !allowedHost ||
+      url.username !== '' ||
+      url.password !== ''
+    ) {
+      reject(new Error('Storage devolvió una URL de carga no confiable.'))
+      return
+    }
+    const xhr = new XMLHttpRequest()
 
     function finish(error?: Error): void {
       if (settled) return
       settled = true
-      clearTimeout(timeout)
-      unsubscribe()
+      xhr.onload = null
+      xhr.onerror = null
+      xhr.onabort = null
+      xhr.ontimeout = null
+      xhr.upload.onprogress = null
       if (error) reject(error)
-      else {
-        onProgress?.(100)
-        resolve()
-      }
+      else resolve()
     }
 
-    const stopObserving = task.on(
-      'state_changed',
-      (snapshot) => {
-        onProgress?.(snapshot.totalBytes === 0
-          ? 0
-          : Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100))
-      },
-      (error) => {
-        finish(timedOut
-          ? new Error(`La carga se canceló al superar el límite de ${UPLOAD_TIMEOUT_MS / 1000} segundos.`, { cause: error })
-          : error)
-      },
-      () => finish(),
-    )
-    unsubscribe = stopObserving
-    if (settled) unsubscribe()
+    xhr.open('PUT', url.toString())
+    xhr.timeout = UPLOAD_TIMEOUT_MS
+    xhr.setRequestHeader('Content-Type', file.type)
+    xhr.setRequestHeader('Content-Range', `bytes 0-${file.size - 1}/${file.size}`)
+    xhr.upload.onprogress = (event) => {
+      onProgress?.(event.lengthComputable
+        ? Math.round((event.loaded / event.total) * 100)
+        : 0)
+    }
+    xhr.onload = () => {
+      if (xhr.status === 200 || xhr.status === 201) {
+        onProgress?.(100)
+        finish()
+        return
+      }
+      const message = xhr.status === 412
+        ? 'El objeto ya existe y Storage rechazó la escritura condicional.'
+        : xhr.status === 401
+          ? 'La sesión protegida de carga expiró o no es válida. Comprobá el archivo antes de reintentar.'
+          : xhr.status === 403
+            ? 'Storage denegó la carga. Verificá la identidad administrativa y la configuración del bucket.'
+            : xhr.status === 404
+              ? 'Storage no encontró el bucket o la sesión de carga. Verificá la configuración del bucket.'
+              : `Storage no confirmó la carga (HTTP ${xhr.status}).`
+      const error = new Error(message)
+      Object.assign(error, {
+        code: xhr.status === 412 ? 'storage/object-already-exists' : 'storage/unknown',
+      })
+      finish(error)
+    }
+    xhr.onerror = () => {
+      const error = new Error('Falló la conexión durante la carga. Comprobá el resultado antes de reintentar.')
+      Object.assign(error, { code: 'storage/retry-limit-exceeded' })
+      finish(error)
+    }
+    xhr.onabort = () => {
+      const error = new Error('La carga se canceló. Comprobá el resultado antes de reintentar.')
+      Object.assign(error, { code: 'storage/canceled' })
+      finish(error)
+    }
+    xhr.ontimeout = () => {
+      const error = new Error(`La carga se canceló al superar el límite de ${UPLOAD_TIMEOUT_MS / 1000} segundos.`)
+      Object.assign(error, { code: 'storage/retry-limit-exceeded' })
+      finish(error)
+      xhr.abort()
+    }
+    xhr.send(file)
   })
+}
+
+function createUploadSession(operation: MediaUploadOperation): Promise<string> {
+  const functions = requireFirebase(firebaseFunctions, 'Functions')
+  const start = httpsCallable<
+    MediaUploadOperation & { phase: 'start' },
+    { uploadUrl: string }
+  >(functions, 'finalizeMediaUpload', { timeout: 30_000 })
+  return start({ ...operation, phase: 'start' }).then(({ data }) => data.uploadUrl)
 }
 
 async function hashBlob(blob: Blob): Promise<string> {
@@ -322,17 +371,9 @@ export async function uploadMedia(
 
     stage = 'uploading'
     onStage?.(stage)
-    const task = uploadBytesResumable(ref(getStorage(), storagePath), file, {
-      contentType: file.type,
-      customMetadata: {
-        visibility: 'private',
-        uploadedBy: user.uid,
-        uploadId: operation.operationId,
-        sha256: operation.sha256,
-      },
-    })
     try {
-      await waitForUpload(task, onProgress)
+      const uploadUrl = await createUploadSession(operation)
+      await uploadToResumableSession(uploadUrl, file, onProgress)
     } catch (uploadError) {
       const recovered = await withTimeout(
         verifyExistingUpload(operation),
@@ -373,12 +414,12 @@ export async function finalizeMediaUpload(
   assertUploadOperation(user, operation)
   try {
     const functions = requireFirebase(firebaseFunctions, 'Functions')
-    const finalize = httpsCallable<MediaUploadOperation, { mediaId: string }>(
+    const finalize = httpsCallable<FinalizeMediaUploadRequest, { mediaId: string }>(
       functions,
       'finalizeMediaUpload',
       { timeout: 30_000 },
     )
-    const result = await finalize(operation)
+    const result = await finalize({ ...operation, phase: 'finalize' })
     return result.data.mediaId
   } catch (error) {
     throw toFirebaseServiceError(error, 'No se pudo verificar y registrar el archivo multimedia')

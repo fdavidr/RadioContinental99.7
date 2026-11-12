@@ -21,7 +21,6 @@ import {
   getMetadata,
   getStorage,
   ref,
-  uploadBytes,
 } from 'firebase/storage'
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing'
 
@@ -42,7 +41,7 @@ const testEnvironment = await initializeTestEnvironment({
 })
 const adminApp = initializeAdminApp({
   projectId,
-  storageBucket: `${projectId}.appspot.com`,
+  storageBucket: process.env.MEDIA_STORAGE_BUCKET ?? `${projectId}.firebasestorage.app`,
 }, 'media-emulator-admin')
 const adminAuth = getAdminAuth(adminApp)
 const adminDb = getAdminFirestore(adminApp)
@@ -74,7 +73,7 @@ async function createUser({ superadmin = false, verified = true } = {}) {
     apiKey: 'demo-api-key',
     authDomain: `${projectId}.firebaseapp.com`,
     projectId,
-    storageBucket: `${projectId}.appspot.com`,
+    storageBucket: process.env.MEDIA_STORAGE_BUCKET ?? `${projectId}.firebasestorage.app`,
   }, `media-client-${suffix}`)
   apps.push(app)
   const auth = getAuth(app)
@@ -94,6 +93,7 @@ async function createUser({ superadmin = false, verified = true } = {}) {
     db: firestore,
     storage,
     finalize: httpsCallable(functions, 'finalizeMediaUpload', { timeout: 15_000 }),
+    beginUpload: httpsCallable(functions, 'finalizeMediaUpload', { timeout: 15_000 }),
     finalizeWithTimeout: (timeout) => httpsCallable(functions, 'finalizeMediaUpload', { timeout }),
     changeState: httpsCallable(functions, 'setMediaState', { timeout: 15_000 }),
   }
@@ -105,7 +105,7 @@ function createAnonymousStorage() {
     apiKey: 'demo-api-key',
     authDomain: `${projectId}.firebaseapp.com`,
     projectId,
-    storageBucket: `${projectId}.appspot.com`,
+    storageBucket: process.env.MEDIA_STORAGE_BUCKET ?? `${projectId}.firebasestorage.app`,
   }, `media-anonymous-${suffix}`)
   apps.push(app)
   const storage = getStorage(app)
@@ -127,15 +127,33 @@ function mediaUpload(operationId, bytes, overrides = {}) {
 }
 
 async function upload(user, operation, bytes, { sha256 = operation.sha256, path = operation.operationId } = {}) {
-  await uploadBytes(ref(user.storage, `media/${path}`), bytes, {
-    contentType: operation.contentType,
-    customMetadata: {
-      visibility: 'private',
-      uploadedBy: user.uid,
-      uploadId: path,
-      sha256,
+  const uploadData = {
+    ...operation,
+    operationId: path,
+    uid: user.uid,
+    storagePath: `media/${path}`,
+    sha256,
+    phase: 'start',
+  }
+  const { data } = await user.beginUpload(uploadData)
+  const response = await fetch(data.uploadUrl, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': operation.contentType,
+      'Content-Range': `bytes 0-${bytes.length - 1}/${bytes.length}`,
     },
+    body: bytes,
   })
+  assert.ok(response.status === 200 || response.status === 201, `Storage upload failed with HTTP ${response.status}`)
+}
+
+function finalizationData(user, operation) {
+  return {
+    ...operation,
+    uid: user.uid,
+    storagePath: `media/${operation.operationId}`,
+    phase: 'finalize',
+  }
 }
 
 function errorCode(error) {
@@ -149,7 +167,7 @@ test('Auth, Storage, Callable Functions, Firestore, retries, transitions, and co
   await upload(admin, operation, bytes)
 
   await assert.rejects(
-    admin.finalizeWithTimeout(500)(operation),
+    admin.finalizeWithTimeout(1)(finalizationData(admin, operation)),
     (error) => errorCode(error).endsWith('/deadline-exceeded'),
   )
   let committedAfterClientTimeout = false
@@ -163,8 +181,8 @@ test('Auth, Storage, Callable Functions, Firestore, retries, transitions, and co
   assert.equal(committedAfterClientTimeout, true)
 
   const [first, concurrentRetry] = await Promise.all([
-    admin.finalize(operation),
-    admin.finalize(operation),
+    admin.finalize(finalizationData(admin, operation)),
+    admin.finalize(finalizationData(admin, operation)),
   ])
   assert.deepEqual(first.data, { mediaId: operation.operationId })
   assert.deepEqual(concurrentRetry.data, { mediaId: operation.operationId })
@@ -211,26 +229,39 @@ test('Functions reject unverified, unprivileged, wrong-owner, bad-hash, missing-
 
   for (const user of [editor, unverifiedAdmin]) {
     const operation = mediaUpload(randomUUID(), bytes)
-    await assert.rejects(user.finalize(operation), (error) => errorCode(error).endsWith('/permission-denied'))
+    await assert.rejects(
+      user.beginUpload({ ...finalizationData(user, operation), phase: 'start' }),
+      (error) => errorCode(error).endsWith('/permission-denied'),
+    )
     assert.equal((await adminDb.collection('media').doc(operation.operationId).get()).exists, false)
   }
 
   const owned = mediaUpload(randomUUID(), bytes)
   await upload(admin, owned, bytes)
-  await assert.rejects(editor.finalize(owned), (error) => errorCode(error).endsWith('/permission-denied'))
   const otherAdmin = await createUser({ superadmin: true })
   await assert.rejects(
-    otherAdmin.finalize(owned),
+    editor.beginUpload({ ...finalizationData(editor, owned), phase: 'start' }),
+    (error) => errorCode(error).endsWith('/permission-denied'),
+  )
+  await assert.rejects(
+    otherAdmin.finalize(finalizationData(otherAdmin, owned)),
     (error) => errorCode(error).endsWith('/already-exists'),
   )
 
   const badHash = mediaUpload(randomUUID(), bytes)
-  await upload(admin, badHash, bytes, { sha256: '0'.repeat(64) })
-  await assert.rejects(admin.finalize(badHash), (error) => errorCode(error).endsWith('/already-exists'))
+  const badHashOperation = { ...badHash, sha256: '0'.repeat(64) }
+  await upload(admin, badHashOperation, bytes)
+  await assert.rejects(
+    admin.finalize(finalizationData(admin, badHashOperation)),
+    (error) => errorCode(error).endsWith('/already-exists'),
+  )
   assert.equal((await adminDb.collection('media').doc(badHash.operationId).get()).exists, false)
 
   const missing = mediaUpload(randomUUID(), bytes)
-  await assert.rejects(admin.finalize(missing), (error) => errorCode(error).endsWith('/failed-precondition'))
+  await assert.rejects(
+    admin.finalize(finalizationData(admin, missing)),
+    (error) => errorCode(error).endsWith('/failed-precondition'),
+  )
 
   const collision = mediaUpload(randomUUID(), bytes)
   await upload(admin, collision, bytes)
@@ -243,7 +274,10 @@ test('Functions reject unverified, unprivileged, wrong-owner, bad-hash, missing-
     sizeBytes: collision.sizeBytes,
     altText: collision.altText,
   })
-  await assert.rejects(admin.finalize(collision), (error) => errorCode(error).endsWith('/already-exists'))
+  await assert.rejects(
+    admin.finalize(finalizationData(admin, collision)),
+    (error) => errorCode(error).endsWith('/already-exists'),
+  )
   assert.equal((await collisionRef.get()).data().createdBy, 'different-owner')
 })
 
@@ -263,11 +297,11 @@ test('concurrent uploads with one ID cannot replace bytes; ambiguous finalizatio
 
   const objectBytes = Buffer.from(await getBytes(ref(admin.storage, `media/${operationId}`)))
   const operation = objectBytes.equals(firstBytes) ? firstOperation : secondOperation
-  await admin.finalize(operation)
-  await admin.finalize(operation)
+  await admin.finalize(finalizationData(admin, operation))
+  await admin.finalize(finalizationData(admin, operation))
   assert.equal((await adminDb.collection('media').doc(operationId).get()).exists, true)
   assert.equal((await adminDb.collection('adminLogs').doc(`media-${operationId}`).get()).exists, true)
-  assert.equal((await getMetadata(ref(admin.storage, `media/${operationId}`))).size, String(objectBytes.length))
+  assert.equal(Number((await getMetadata(ref(admin.storage, `media/${operationId}`))).size), objectBytes.length)
 })
 
 test('Firestore validation failure leaves the completed Storage object private and unregistered', async () => {
@@ -277,7 +311,7 @@ test('Firestore validation failure leaves the completed Storage object private a
   await upload(admin, operation, bytes)
   await adminDb.collection('privateConfig').doc('mediaCapacity').set({ activeCount: 'invalid' })
 
-  await assert.rejects(admin.finalize(operation), (error) =>
+  await assert.rejects(admin.finalize(finalizationData(admin, operation)), (error) =>
     errorCode(error).endsWith('/failed-precondition'))
   assert.equal((await adminDb.collection('media').doc(operation.operationId).get()).exists, false)
   assert.equal((await adminDb.collection('adminLogs').doc(`media-${operation.operationId}`).get()).exists, false)
