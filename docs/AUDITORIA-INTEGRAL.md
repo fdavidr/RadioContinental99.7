@@ -3167,7 +3167,7 @@ Validaciones locales de esta intervención:
 | `npm run lint` | **Código 0**; advertencias preexistentes en frontend, ninguna nueva en `media-state.mjs` |
 | `git diff --check` | **Aprobado** antes de esta actualización documental; repetir después de cerrar el diff |
 
-El PR #1 continúa en borrador y en `eafa968479bbeb86d2d3e9122437b6f604e2e012`; estos cambios todavía no están comprometidos ni respaldados en remoto. No se modificaron reglas, IAM, CORS, UBLA, ACL, Render ni datos productivos; no se desplegaron Functions ni Storage Rules. La clasificación completa de los 32 archivos del PR y la revisión de alcance preceden a cualquier integración o publicación.
+El PR #1 continúa en borrador y su HEAD remoto sigue en `eafa968479bbeb86d2d3e9122437b6f604e2e012`. La corrección fue comprometida localmente como `d1a1a168bb668ab9006ec96667d7f1d586678e5b`; el `git push` fue rechazado porque Git no pudo obtener credenciales de forma no interactiva. Por eso el commit aún no está respaldado en remoto y el PR no contiene la corrección. No se modificaron reglas, IAM, CORS, UBLA, ACL, Render ni datos productivos; no se desplegaron Functions ni Storage Rules. La clasificación completa de los 32 archivos del PR y la revisión de alcance preceden a cualquier integración o publicación.
 
 ## Revisión de alcance del PR #1
 
@@ -3183,4 +3183,4 @@ La dependencia de Firestore es específica: las reglas impiden que clientes cree
 
 Observación de seguridad de C: la suspensión se aplica en Firestore Rules, pero la autorización de las Functions y Storage Rules continúa basada en claims. Un usuario suspendido con claims aún vigentes podría seguir llamando las Functions y leyendo Storage conforme a esos claims; la suspensión no debe presentarse como revocación global inmediata. No se amplió ese mecanismo en esta intervención.
 
-El PR queda en borrador mientras se resuelve esta separación y se revisa el cambio local de transición. No se hizo merge. IAM, CORS, Rules productivas, Render, ACL/UBLA y datos de producción siguen sin cambios.
+El PR queda en borrador mientras se resuelve esta separación y se revisa el cambio de transición. No se hizo merge. El commit local `d1a1a168bb668ab9006ec96667d7f1d586678e5b` no está aún en la rama remota ni en el PR. IAM, CORS, Rules productivas, Render, ACL/UBLA y datos de producción siguen sin cambios.
