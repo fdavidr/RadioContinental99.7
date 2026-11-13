@@ -1,4 +1,8 @@
 {
+  "functions": {
+    "source": "functions",
+    "runtime": "nodejs20"
+  },
   "hosting": {
     "public": "dist",
     "ignore": [
@@ -64,6 +68,7 @@
     "auth": { "port": 9099 },
     "firestore": { "port": 8080 },
     "storage": { "port": 9199 },
+    "functions": { "port": 5001 },
     "ui": { "enabled": false }
   }
 }
