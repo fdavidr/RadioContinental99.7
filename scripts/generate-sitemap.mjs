@@ -1,5 +1,5 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { lstat, mkdir, readFile, readdir, rmdir, unlink, writeFile } from 'node:fs/promises'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertProductionSiteUrl } from './site-config.mjs'
 
@@ -57,6 +57,71 @@ export function createPublicEntries(documents, collectionId, siteUrl) {
     entries.set(new URL(path, `${siteUrl}/`).toString(), document.updateTime ?? null)
   }
   return entries
+}
+
+function getPublicDocumentsWithUniqueSlugs(documents, collectionId) {
+  const publicDocuments = []
+  const documentIdsBySlug = new Map()
+  for (const document of documents) {
+    const fields = document.fields ?? {}
+    if (
+      fields.status?.stringValue !== 'published'
+      || fields.isArchived?.booleanValue !== false
+    ) continue
+
+    const slug = fields.slug?.stringValue
+    if (typeof slug !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) continue
+    const documentId = document.name?.split('/').at(-1) || '(ID desconocido)'
+    const documentIds = documentIdsBySlug.get(slug) ?? []
+    documentIds.push(documentId)
+    documentIdsBySlug.set(slug, documentIds)
+    publicDocuments.push(document)
+  }
+
+  const collision = [...documentIdsBySlug].find(([, documentIds]) => documentIds.length > 1)
+  if (collision) {
+    const [slug, documentIds] = collision
+    throw new Error(
+      `Slug duplicado en la colección "${collectionId}": "${slug}" ` +
+      `(documentos: ${documentIds.join(', ')}).`,
+    )
+  }
+  return publicDocuments
+}
+
+function resolveOutputPath(outputDirectory, ...segments) {
+  const rootDirectory = resolve(outputDirectory)
+  const targetPath = resolve(rootDirectory, ...segments)
+  const relativePath = relative(rootDirectory, targetPath)
+  if (
+    !relativePath
+    || relativePath === '..'
+    || relativePath.startsWith(`..${sep}`)
+    || isAbsolute(relativePath)
+  ) {
+    throw new Error(`La ruta generada debe permanecer dentro de ${rootDirectory}.`)
+  }
+  return targetPath
+}
+
+async function ensureOutputSubdirectories(outputDirectory, ...segments) {
+  const rootDirectory = resolve(outputDirectory)
+  await mkdir(rootDirectory, { recursive: true })
+  let currentSegments = []
+  for (const segment of segments) {
+    currentSegments = [...currentSegments, segment]
+    const directory = resolveOutputPath(outputDirectory, ...currentSegments)
+    try {
+      const stats = await lstat(directory)
+      if (!stats.isDirectory() || stats.isSymbolicLink()) {
+        throw new Error(`La ruta de prerender no es un directorio seguro: ${directory}`)
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+      await mkdir(directory)
+    }
+  }
+  return resolveOutputPath(outputDirectory, ...segments)
 }
 
 function getStringField(fields, fieldName) {
@@ -153,19 +218,61 @@ export function createPrerenderedHtml(template, document, collectionId, siteUrl,
 }
 
 async function writePrerenderedPages({ documents, collectionId, siteUrl, outputDirectory, socialImageUrl }) {
-  const template = await readFile(resolve(outputDirectory, 'index.html'), 'utf8')
+  const template = await readFile(resolveOutputPath(outputDirectory, 'index.html'), 'utf8')
   const route = collectionId === 'posts' ? 'noticias' : 'programas'
   let generated = 0
   for (const document of documents) {
     const html = createPrerenderedHtml(template, document, collectionId, siteUrl, socialImageUrl)
     if (!html) continue
     const slug = getStringField(document.fields ?? {}, 'slug')
-    const pageDirectory = resolve(outputDirectory, route, slug)
-    await mkdir(pageDirectory, { recursive: true })
-    await writeFile(resolve(pageDirectory, 'index.html'), html, 'utf8')
+    await ensureOutputSubdirectories(outputDirectory, route, slug)
+    const pagePath = resolveOutputPath(outputDirectory, route, slug, 'index.html')
+    try {
+      const stats = await lstat(pagePath)
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw new Error(`La ruta de prerender no es un archivo seguro: ${pagePath}`)
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+    await writeFile(pagePath, html, 'utf8')
     generated += 1
   }
   return generated
+}
+
+async function removeObsoletePrerenderedPages({ collectionId, publishedSlugs, outputDirectory }) {
+  const route = collectionId === 'posts' ? 'noticias' : 'programas'
+  const routeDirectory = resolveOutputPath(outputDirectory, route)
+  let routeStats
+  try {
+    routeStats = await lstat(routeDirectory)
+  } catch (error) {
+    if (error.code === 'ENOENT') return
+    throw error
+  }
+  if (!routeStats.isDirectory() || routeStats.isSymbolicLink()) {
+    throw new Error(`La ruta de prerender no es un directorio seguro: ${routeDirectory}`)
+  }
+
+  for (const entry of await readdir(routeDirectory, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.name)) continue
+    if (publishedSlugs.has(entry.name)) continue
+
+    const pageDirectory = resolveOutputPath(outputDirectory, route, entry.name)
+    const pagePath = resolveOutputPath(outputDirectory, route, entry.name, 'index.html')
+    let pageStats
+    try {
+      pageStats = await lstat(pagePath)
+    } catch (error) {
+      if (error.code === 'ENOENT') continue
+      throw error
+    }
+    if (!pageStats.isFile() || pageStats.isSymbolicLink()) continue
+
+    await unlink(pagePath)
+    if ((await readdir(pageDirectory)).length === 0) await rmdir(pageDirectory)
+  }
 }
 
 export async function fetchPublishedDocuments({ endpoint, collectionId, fetchImpl = fetch }) {
@@ -257,16 +364,22 @@ export async function generateSitemap({
     for (const collectionId of ['posts', 'programs']) {
       try {
         const documents = await fetchPublishedDocuments({ endpoint, collectionId, fetchImpl })
-        for (const [url, lastmod] of createPublicEntries(documents, collectionId, siteUrl)) {
-          entries.set(url, lastmod)
-        }
+        const publicDocuments = getPublicDocumentsWithUniqueSlugs(documents, collectionId)
         const generated = await writePrerenderedPages({
-          documents,
+          documents: publicDocuments,
           collectionId,
           siteUrl,
           outputDirectory,
           socialImageUrl,
         })
+        await removeObsoletePrerenderedPages({
+          collectionId,
+          publishedSlugs: new Set(publicDocuments.map((document) => document.fields.slug.stringValue)),
+          outputDirectory,
+        })
+        for (const [url, lastmod] of createPublicEntries(publicDocuments, collectionId, siteUrl)) {
+          entries.set(url, lastmod)
+        }
         logger.log(`Páginas prerenderizadas para ${collectionId}: ${generated}.`)
       } catch (error) {
         failures.push(`${collectionId}: ${error.message}`)

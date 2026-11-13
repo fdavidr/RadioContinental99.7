@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -179,6 +179,112 @@ test('successful build prerenders only public posts and programs into their slug
     assert.equal(entries.has('https://radio.example/programas/programa-publicado'), true)
     assert.doesNotMatch(sitemap, /noticia-borrador/)
     await assert.rejects(readFile(join(outputDirectory, 'noticias', 'noticia-borrador', 'index.html')))
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true })
+  }
+})
+
+test('duplicate public slugs fail without overwriting the existing prerendered page', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'radio-prerender-duplicate-'))
+  const template = '<html><head><title>Radio</title></head><body><div id="root"></div></body></html>'
+  const first = document('slug-duplicado')
+  first.name = 'projects/radio/databases/(default)/documents/posts/documento-uno'
+  const second = document('slug-duplicado')
+  second.name = 'projects/radio/databases/(default)/documents/posts/documento-dos'
+  const existingPage = join(outputDirectory, 'noticias', 'slug-duplicado', 'index.html')
+
+  try {
+    await mkdir(join(outputDirectory, 'noticias', 'slug-duplicado'), { recursive: true })
+    await writeFile(join(outputDirectory, 'index.html'), template, 'utf8')
+    await writeFile(existingPage, 'contenido anterior', 'utf8')
+
+    await assert.rejects(generateSitemap({
+      siteUrl,
+      projectId: 'radio-project',
+      outputDirectory,
+      requireEditorialPrerender: true,
+      fetchImpl: async (_url, options) => {
+        const collectionId = JSON.parse(options.body).structuredQuery.from[0].collectionId
+        const documents = collectionId === 'posts' ? [first, second] : []
+        return new Response(JSON.stringify(documents.map((item) => ({ document: item }))), { status: 200 })
+      },
+      logger: { log() {}, warn() {} },
+    }), /posts.*slug-duplicado.*documento-uno, documento-dos/)
+
+    assert.equal(await readFile(existingPage, 'utf8'), 'contenido anterior')
+    const sitemap = await readFile(join(outputDirectory, 'sitemap.xml'), 'utf8')
+    assert.doesNotMatch(sitemap, /noticias\/slug-duplicado/)
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true })
+  }
+})
+
+test('successful collection refresh removes obsolete pages but preserves unrelated files', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'radio-prerender-reconcile-'))
+  const template = '<html><head><title>Radio</title><link rel="canonical" href="https://radio.example/" /></head><body><div id="root"></div></body></html>'
+  const currentPage = document('slug-actual')
+  const routeIndex = join(outputDirectory, 'noticias', 'index.html')
+  const obsoletePage = join(outputDirectory, 'noticias', 'slug-obsoleto', 'index.html')
+  const preservedFile = join(outputDirectory, 'noticias', 'slug-obsoleto', 'imagen.txt')
+  const assetFile = join(outputDirectory, 'noticias', 'assets', 'keep.txt')
+
+  try {
+    await mkdir(join(outputDirectory, 'noticias', 'slug-obsoleto'), { recursive: true })
+    await mkdir(join(outputDirectory, 'noticias', 'assets'), { recursive: true })
+    await writeFile(join(outputDirectory, 'index.html'), template, 'utf8')
+    await writeFile(routeIndex, 'índice de ruta', 'utf8')
+    await writeFile(obsoletePage, 'página obsoleta', 'utf8')
+    await writeFile(preservedFile, 'archivo ajeno', 'utf8')
+    await writeFile(assetFile, 'asset', 'utf8')
+
+    await generateSitemap({
+      siteUrl,
+      projectId: 'radio-project',
+      outputDirectory,
+      fetchImpl: async (_url, options) => {
+        const collectionId = JSON.parse(options.body).structuredQuery.from[0].collectionId
+        const documents = collectionId === 'posts' ? [currentPage] : []
+        return new Response(JSON.stringify(documents.map((item) => ({ document: item }))), { status: 200 })
+      },
+      logger: { log() {}, warn(message) { assert.fail(message) } },
+    })
+
+    await assert.rejects(readFile(obsoletePage))
+    assert.equal(await readFile(routeIndex, 'utf8'), 'índice de ruta')
+    assert.equal(await readFile(preservedFile, 'utf8'), 'archivo ajeno')
+    assert.equal(await readFile(assetFile, 'utf8'), 'asset')
+    assert.match(
+      await readFile(join(outputDirectory, 'noticias', 'slug-actual', 'index.html'), 'utf8'),
+      /canonical href="https:\/\/radio\.example\/noticias\/slug-actual"/,
+    )
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true })
+  }
+})
+
+test('failed collection query preserves existing prerendered pages', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'radio-prerender-query-failure-'))
+  const template = '<html><head><title>Radio</title></head><body><div id="root"></div></body></html>'
+  const existingPage = join(outputDirectory, 'noticias', 'slug-publicado', 'index.html')
+
+  try {
+    await mkdir(join(outputDirectory, 'noticias', 'slug-publicado'), { recursive: true })
+    await writeFile(join(outputDirectory, 'index.html'), template, 'utf8')
+    await writeFile(existingPage, 'página existente', 'utf8')
+
+    await generateSitemap({
+      siteUrl,
+      projectId: 'radio-project',
+      outputDirectory,
+      fetchImpl: async (_url, options) => {
+        const collectionId = JSON.parse(options.body).structuredQuery.from[0].collectionId
+        if (collectionId === 'posts') return new Response('Firestore unavailable', { status: 503 })
+        return new Response('[]', { status: 200 })
+      },
+      logger: { log() {}, warn() {} },
+    })
+
+    assert.equal(await readFile(existingPage, 'utf8'), 'página existente')
   } finally {
     await rm(outputDirectory, { recursive: true, force: true })
   }
