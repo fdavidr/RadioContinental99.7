@@ -10,6 +10,10 @@ if (!projectId) {
 }
 
 const mediaRuntimeServiceAccount = 'radio-media-runtime@radio997-d5380.iam.gserviceaccount.com'
+const mediaCallableCors = [
+  'https://continental997.fm',
+  'https://www.continental997.fm',
+]
 
 initializeApp({
   storageBucket: process.env.MEDIA_STORAGE_BUCKET ?? `${projectId}.firebasestorage.app`,
@@ -26,6 +30,8 @@ const mediaOperations = createMediaOperations({
 export const finalizeMediaUpload = onCall(
   {
     region: 'us-central1',
+    cors: mediaCallableCors,
+    invoker: 'public',
     serviceAccount: mediaRuntimeServiceAccount,
     concurrency: 10,
     maxInstances: 5,
@@ -38,6 +44,8 @@ export const finalizeMediaUpload = onCall(
 export const setMediaState = onCall(
   {
     region: 'us-central1',
+    cors: mediaCallableCors,
+    invoker: 'public',
     serviceAccount: mediaRuntimeServiceAccount,
     concurrency: 10,
     maxInstances: 5,
