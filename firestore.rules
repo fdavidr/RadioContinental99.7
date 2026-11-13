@@ -256,12 +256,39 @@ service cloud.firestore {
         || (!(collectionName in ['media', 'banners']) && isEditor());
     }
 
+    function validAdminLogTarget() {
+      let targetPath = /databases/$(database)/documents/$(request.resource.data.collection)/$(request.resource.data.documentId);
+      let target = getAfter(targetPath).data;
+      return existsAfter(targetPath)
+        && (
+          request.resource.data.collection == 'publicConfig'
+          ? request.resource.data.action == 'update'
+            && request.resource.data.documentId == 'site'
+            && target.updatedAt == request.time
+          : request.resource.data.action == 'create'
+            ? !exists(targetPath)
+              && target.createdBy == request.auth.uid
+              && target.createdAt == request.time
+              && target.updatedBy == request.auth.uid
+              && target.updatedAt == request.time
+            : exists(targetPath)
+              && target.updatedBy == request.auth.uid
+              && target.updatedAt == request.time
+              && (request.resource.data.action != 'publish' || target.status == 'published')
+              && (request.resource.data.action != 'archive'
+                || (target.status == 'archived' && target.isArchived == true))
+        );
+    }
+
     match /publicConfig/{documentId} {
       allow read: if documentId == 'site'
-        && resource.data.keys().hasOnly([
-          'stationName', 'slogan', 'streamUrl', 'stationTimeZone', 'contactEmail', 'contactPhone',
-          'whatsappUrl', 'socialLinks', 'updatedAt'
-        ]);
+        && (
+          !exists(/databases/$(database)/documents/publicConfig/site)
+          || resource.data.keys().hasOnly([
+            'stationName', 'slogan', 'streamUrl', 'stationTimeZone', 'contactEmail', 'contactPhone',
+            'whatsappUrl', 'socialLinks', 'updatedAt'
+          ])
+        );
       allow create, update: if isSuperadmin()
         && documentId == 'site'
         && request.resource.data.keys().hasOnly([
@@ -317,7 +344,11 @@ service cloud.firestore {
         && validString(request.resource.data.collection, 80)
         && validString(request.resource.data.documentId, 128)
         && request.resource.data.createdAt == request.time
-        && validString(request.resource.data.summary, 240);
+        && validString(request.resource.data.summary, 240)
+        && request.resource.data.collection in [
+          'publicConfig', 'posts', 'programs', 'schedule', 'categories', 'tags', 'media', 'banners'
+        ]
+        && validAdminLogTarget();
       allow update, delete: if false;
     }
 
@@ -332,6 +363,7 @@ service cloud.firestore {
             && (isEditor() || isPublicRecord()))
         );
       allow create: if isEditorialCollection(collectionName)
+        && collectionName != 'media'
         && canEditCollection(collectionName)
         && isEditor()
         && validRecord(collectionName)
@@ -340,6 +372,7 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
       allow update: if isEditorialCollection(collectionName)
+        && collectionName != 'media'
         && canEditCollection(collectionName)
         && validRecord(collectionName)
         && request.resource.data.createdBy == resource.data.createdBy

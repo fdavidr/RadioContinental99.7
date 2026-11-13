@@ -19,6 +19,7 @@ import {
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore'
 
 const projectId = 'demo-radio-rules'
@@ -39,6 +40,22 @@ const postFields = (uid, status = 'published', isArchived = false) => ({
   searchTerms: ['noticia', 'prueba'],
   heroMediaId: null,
   authorUid: uid,
+  status,
+  isArchived,
+  ...(status === 'published' ? { publishedAt: serverTimestamp() } : {}),
+  createdAt: serverTimestamp(),
+  updatedAt: serverTimestamp(),
+  createdBy: uid,
+  updatedBy: uid,
+})
+
+const mediaFields = (uid, status = 'published', visibility = 'public', isArchived = false) => ({
+  originalName: 'prueba.jpg',
+  storagePath: `media/${uid}.jpg`,
+  contentType: 'image/jpeg',
+  sizeBytes: 1024,
+  altText: 'Imagen de prueba',
+  visibility,
   status,
   isArchived,
   ...(status === 'published' ? { publishedAt: serverTimestamp() } : {}),
@@ -112,6 +129,10 @@ before(async () => {
       createdBy: 'seed',
       updatedBy: 'seed',
     })
+    await setDoc(doc(db, 'media', 'public-media'), mediaFields('seed'))
+    await setDoc(doc(db, 'media', 'private-published-media'), mediaFields('seed', 'published', 'private'))
+    await setDoc(doc(db, 'media', 'draft-public-media'), mediaFields('seed', 'draft'))
+    await setDoc(doc(db, 'media', 'archived-public-media'), mediaFields('seed', 'archived', 'public', true))
     await setDoc(doc(db, 'users', 'other-user'), {
       uid: 'other-user',
       email: 'other@example.invalid',
@@ -215,6 +236,22 @@ test('anonymous visitors cannot read drafts or archived editorial documents', as
   await assertFails(getDoc(doc(db, 'programs', 'archived-program')))
 })
 
+test('anonymous visitors can read media only when published, active, and public', async () => {
+  const db = testEnvironment.unauthenticatedContext().firestore()
+  await assertSucceeds(getDoc(doc(db, 'media', 'public-media')))
+  await assertFails(getDoc(doc(db, 'media', 'private-published-media')))
+  await assertFails(getDoc(doc(db, 'media', 'draft-public-media')))
+  await assertFails(getDoc(doc(db, 'media', 'archived-public-media')))
+
+  const publicMedia = await assertSucceeds(getDocs(query(
+    collection(db, 'media'),
+    where('status', '==', 'published'),
+    where('isArchived', '==', false),
+    where('visibility', '==', 'public'),
+  )))
+  assert.deepEqual(publicMedia.docs.map((item) => item.id), ['public-media'])
+})
+
 test('anonymous visitors cannot create, modify, or delete editorial content', async () => {
   const db = testEnvironment.unauthenticatedContext().firestore()
   await assertFails(setDoc(doc(db, 'posts', 'anonymous-post'), postFields('anonymous')))
@@ -233,18 +270,28 @@ test('verified editors can manage editorial records but not superadmin-only coll
     editor: true,
   }).firestore()
 
-  await assertSucceeds(setDoc(doc(db, 'posts', 'editor-post'), postFields(uid, 'draft')))
+  const createBatch = writeBatch(db)
+  createBatch.set(doc(db, 'posts', 'editor-post'), postFields(uid, 'draft'))
+  createBatch.set(doc(db, 'adminLogs', 'editor-activity'), {
+    actorUid: uid,
+    action: 'create',
+    collection: 'posts',
+    documentId: 'editor-post',
+    createdAt: serverTimestamp(),
+    summary: 'create:posts',
+  })
+  await assertSucceeds(createBatch.commit())
   await assertSucceeds(getDoc(doc(db, 'posts', 'draft-post')))
   await assertSucceeds(updateDoc(doc(db, 'posts', 'published-post'), {
     title: 'Noticia editada',
     updatedAt: serverTimestamp(),
     updatedBy: uid,
   }))
-  await assertSucceeds(setDoc(doc(db, 'adminLogs', 'editor-activity'), {
+  await assertFails(setDoc(doc(db, 'adminLogs', 'unlinked-activity'), {
     actorUid: uid,
     action: 'create',
     collection: 'posts',
-    documentId: 'editor-post',
+    documentId: 'published-post',
     createdAt: serverTimestamp(),
     summary: 'create:posts',
   }))
@@ -262,9 +309,15 @@ test('verified editors can manage editorial records but not superadmin-only coll
     createdBy: uid,
     updatedBy: uid,
   }))
+  await assertFails(updateDoc(doc(db, 'media', 'public-media'), {
+    altText: 'Cambio directo del editor',
+    updatedAt: serverTimestamp(),
+    updatedBy: uid,
+  }))
   await assertFails(deleteDoc(doc(db, 'posts', 'published-post')))
   await assertFails(getDoc(doc(db, 'privateConfig', 'internal')))
   await assertFails(setDoc(doc(db, 'users', uid), { role: 'superadmin' }))
+  await assertFails(updateDoc(doc(db, 'users', uid), { role: 'superadmin' }))
 })
 
 test('unverified or unprivileged signed-in users cannot administer content or other users', async () => {
@@ -285,9 +338,10 @@ test('unverified or unprivileged signed-in users cannot administer content or ot
   await assertFails(getDoc(doc(ordinaryDb, 'users', 'other-user')))
   await assertFails(updateDoc(doc(ordinaryDb, 'users', 'other-user'), { role: 'superadmin' }))
   await assertFails(setDoc(doc(ordinaryDb, 'privateConfig', 'injected'), { secret: true }))
+  await assertFails(setDoc(doc(ordinaryDb, 'media', 'ordinary-media'), mediaFields('ordinary-user')))
 })
 
-test('superadmins retain administrative reads and can manage superadmin-only editorial records', async () => {
+test('superadmins retain administrative reads but media writes must use the trusted backend', async () => {
   const uid = 'superadmin-user'
   const db = testEnvironment.authenticatedContext(uid, {
     email_verified: true,
@@ -297,19 +351,17 @@ test('superadmins retain administrative reads and can manage superadmin-only edi
   await assertSucceeds(getDoc(doc(db, 'users', 'other-user')))
   await assertSucceeds(getDoc(doc(db, 'privateConfig', 'internal')))
   await assertSucceeds(getDoc(doc(db, 'adminLogs', 'activity')))
-  await assertSucceeds(setDoc(doc(db, 'media', 'admin-media'), {
-    originalName: 'imagen.jpg',
-    storagePath: 'media/admin.jpg',
-    contentType: 'image/jpeg',
-    sizeBytes: 1000,
-    altText: 'Imagen',
-    visibility: 'private',
-    status: 'draft',
-    isArchived: false,
-    createdAt: serverTimestamp(),
+  await assertSucceeds(getDoc(doc(db, 'media', 'private-published-media')))
+  await assertFails(setDoc(doc(db, 'media', 'admin-media'), mediaFields(uid, 'draft', 'private')))
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), 'media', 'admin-update-target'), mediaFields('seed', 'draft', 'private'))
+  })
+  await assertFails(updateDoc(doc(db, 'media', 'admin-update-target'), {
+    altText: 'Cambio directo del superadmin',
     updatedAt: serverTimestamp(),
-    createdBy: uid,
     updatedBy: uid,
   }))
+  await assertFails(deleteDoc(doc(db, 'media', 'admin-update-target')))
+  await assertFails(updateDoc(doc(db, 'users', uid), { role: 'editor' }))
   await assertFails(deleteDoc(doc(db, 'posts', 'published-post')))
 })
