@@ -658,3 +658,46 @@ No se modificaron reglas, cuentas, contraseñas, claims, DNS, archivos de Render
 | N.º | Tarea / qué hacer y cómo comprobarlo | Dónde / insumos | Responsable | Prioridad | Estado |
 |---:|---|---|---|---|---|
 | 45 | Corregir en el Static Site existente la regla efectiva que responde con `301 Location: /index.html`; sincronizar Blueprint/branch y convertir reglas de rutas SPA a Rewrite, desplegar solo con autorización y verificar que `/admin/login` conserve URL y cargue el formulario. | Render Dashboard → Static Site `radiocontinental99-7` → Redirects/Rewrites/Blueprint; `render.yaml`; pruebas HTTP posteriores. | REQUIERE ACCIÓN Y AUTORIZACIÓN DEL PROPIETARIO | P0 | Pendiente: producción sigue redirigiendo; React/local route funciona, pero Firebase Auth local está sin configurar |
+
+## Fase 1 — cierre de carga multimedia (2026-11-13)
+
+Esta actualización registra evidencia de producción y pruebas locales sin cerrar los bloqueadores generales del lanzamiento. Los estados distinguen configuración desplegada, observación directa y validación local.
+
+### Avances y evidencia
+
+| Avance | Estado | Evidencia |
+|---|---|---|
+| Cuenta runtime `radio-media-runtime@radio997-d5380.iam.gserviceaccount.com` | VERIFICADO | Ambas funciones activas la muestran como cuenta de servicio; la carga real backend → Storage → Firestore también completó. |
+| Roles IAM y acceso al bucket | PUBLICADO | El propietario confirmó que la cuenta tiene los grants requeridos; no se modificaron roles en esta fase. |
+| `finalizeMediaUpload` y `setMediaState` | PUBLICADO | Descripciones Gen 2: `ACTIVE`, callable, `us-central1`, Node.js 22; ambas apuntan al mismo digest de imagen de Artifact Registry. |
+| Correspondencia del código desplegado | VERIFICADO | Ambas funciones refieren al build `1a81ff49-2db4-47e4-9d93-96209d59c519` y al digest activo `0ce4ff…`; SHA-256 de `index.mjs`, `src/media-operations.mjs`, `package.json` y `package-lock.json` coincide entre los archivos fuente de cada despliegue y el árbol local. |
+| Runtime Node.js 22 | PUBLICADO | Funciones activas con `nodejs22`; `firebase.json` y `functions/package.json`/lock fijan 22 localmente. |
+| CORS de Functions | VERIFICADO | OPTIONS devolvió HTTP 204 con ACAO exacto para `https://continental99.fm`, `https://www.continental99.fm`, `https://continental997.fm` y `https://www.continental997.fm`; solo se permite POST y `authorization,content-type`. |
+| CORS de Cloud Storage | VERIFICADO | Bucket `radio997-d5380.firebasestorage.app`, metageneration 7: GET/PUT; orígenes `https://continental997.fm`, `https://radiocontinental99-7.onrender.com`, `https://continental99.fm` y `https://www.continental99.fm`; headers Firebase y GCS explícitos, sin `*`. |
+| Transferencia real desde el panel y registro privado | VERIFICADO | Se transfirió una PNG no sensible de 68 bytes; el documento `media/d723b9f2-2e61-4597-b852-c8c67994893f` se leyó desde Firestore con `status=draft`, `visibility=private`, `isArchived=false`; el objeto correspondiente existe en `media/` del bucket. |
+| Lectura privada administrativa | VERIFICADO | Tras publicar Storage Rules, el panel abrió la vista previa del borrador privado. |
+| Denegación de lectura privada no autenticada | VERIFICADO | Un GET de producción sin credenciales al objeto que está privado devolvió HTTP 403; la prueba Emulator también deniega lectura anónima, a usuario normal y a superadmin no verificado. |
+| Publicación, lectura pública y despublicación | VERIFICADO | El panel confirmó publicación y visibilidad pública; la vista previa pública cargó la imagen (1×1); la despublicación confirmó retorno a privado. Firestore muestra actualmente `draft/private/isArchived=false`. |
+| Functions, frontend CORS/multimedia y typecheck | VALIDADO LOCALMENTE | 28/28 pruebas de Functions; 4/4 pruebas frontend multimedia/CORS; `npm run typecheck` correcto. |
+| Storage Rules Emulator | VALIDADO LOCALMENTE | La prueba cubre lectura pública anónima, denegación privada anónima y a usuario normal, lectura privada de superadmin verificado, denegación a admin no verificado y denegación de escrituras cliente. |
+| `git diff --check` | VALIDADO LOCALMENTE | Sin errores de whitespace en el diff revisado. |
+| Reglas Storage de producción | PUBLICADO | El despliegue selectivo de Storage Rules se completó antes de esta actualización; habilitó la lectura prevista. No se desplegaron Firestore Rules. |
+| Prueba funcional completa en producción | VERIFICADO | Upload resumible → finalización backend → registro privado → preview administrativa → publicación/preview pública → despublicación; el documento quedó en borrador privado. No se borraron el registro ni el objeto. |
+
+### Dominios: discrepancia que sigue pendiente
+
+Los cuatro orígenes anteriores están permitidos explícitamente por las callables. La inspección DNS/HTTP mostró que `continental99.fm` y `www.continental99.fm` no resuelven desde esta sesión; `continental997.fm` sí responde y fue el host del panel usado para la prueba funcional, mientras `www.continental997.fm` redirige. Por tanto, el CORS está verificado para los cuatro valores exactos, pero queda **PENDIENTE** confirmar cuál dominio `.fm` es el canónico y habilitar DNS/servicio para `.99.fm` si ese es el dominio previsto. No son dominios intercambiables.
+
+### Artifact Registry: diagnóstico y propuesta no aplicada
+
+- **PENDIENTE:** el repositorio de Functions es `us-central1-docker.pkg.dev/radio997-d5380/gcf-artifacts`, formato Docker, ubicación `us-central1`; no tiene políticas de limpieza configuradas. El aviso de deploy se refiere a esta ausencia; no invalida que las funciones estén `ACTIVE`.
+- A la consulta actual había tres versiones del paquete `radio997--d5380__us--central1__finalize_media_upload`: digest `sha256:0ce4ff802077bda98f310a7fc5e05891f1ca570dda3e2ebc8242c4216bd5ba41` (`latest`, `version_1`, creado `2026-11-14T01:27:27Z`), y dos sin etiquetas (`sha256:4fc252ef2aa0b88c7582c20161753db24e47293201f520af621e6314a4c70e28`, `2026-11-14T00:20:18Z`; `sha256:e0e9fc2095a1b0c8707d3cfe235dca8b37deb6915c8c1f2e6154aebda885221d`, `2026-11-14T01:23:46Z`). Ambos servicios Cloud Run activos usan la etiqueta `version_1` y el digest `0ce4ff…`. También existe la imagen `cache:latest`, digest `sha256:4394d34ed76d57dae6cb153ff08a199897123fad4aae9bb4d7cdc13692ab8866`, creada `2026-11-14T00:20:31Z`.
+- **Propuesta conservadora, no aplicada:** política `keep` para las 10 versiones más recientes de cada paquete y `delete` solo para versiones `untagged` con más de `30d`. Artifact Registry permite combinar políticas de conservación y borrado; la conservación prevalece sobre borrado. Antes de aplicarla, revisar la ventana de rollback y confirmar que cualquier digest al que se necesite volver está etiquetado o protegido. No se borró ninguna imagen ni se creó política.
+- Las marcas de creación de Artifact Registry y Firestore que aparecen en UTC después de medianoche corresponden a la noche del 13 de noviembre en la zona local `-04:00`.
+
+### Pruebas que quedan pendientes
+
+- **PENDIENTE — denegación a usuario autenticado normal en producción:** el GET anónimo de producción fue denegado (403) y el Emulator deniega al usuario normal; no se usó una cuenta real no autorizada para probar el caso autenticado en producción.
+- **PENDIENTE — dominio canónico:** resolver la discrepancia DNS entre `.99.fm` y el host `.997.fm` usado en producción.
+- **PENDIENTE — limpieza de Artifact Registry:** aplicar solo tras aprobación del propietario y revisión del rollback; no ejecutar borrado manual.
+- `git diff --check` se ejecutó al cerrar el cambio local. Esta actualización documental no implica que el sistema completo esté listo para lanzamiento; siguen abiertos los demás bloqueadores de esta auditoría.

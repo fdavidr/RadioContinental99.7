@@ -34,6 +34,10 @@ test('Storage allows public reads, verified admin private reads, and denies clie
     superadmin: true,
     email_verified: true,
   }).storage()
+  const regularUserStorage = testEnvironment.authenticatedContext('user', {
+    superadmin: false,
+    email_verified: true,
+  }).storage()
   const unverifiedAdminStorage = testEnvironment.authenticatedContext('unverified', {
     superadmin: true,
     email_verified: false,
@@ -41,6 +45,7 @@ test('Storage allows public reads, verified admin private reads, and denies clie
 
   await assertSucceeds(getBytes(ref(anonymousStorage, 'media/public.jpg')))
   await assertFails(getBytes(ref(anonymousStorage, 'media/private.jpg')))
+  await assertFails(getBytes(ref(regularUserStorage, 'media/private.jpg')))
   await assertSucceeds(getBytes(ref(verifiedAdminStorage, 'media/private.jpg')))
   await assertFails(getBytes(ref(unverifiedAdminStorage, 'media/private.jpg')))
   await assertFails(uploadBytes(ref(verifiedAdminStorage, 'media/direct.jpg'), payload))

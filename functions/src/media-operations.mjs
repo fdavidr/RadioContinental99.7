@@ -5,6 +5,12 @@ const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/avi
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const OPERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const SHA256 = /^[0-9a-f]{64}$/
+const RESUMABLE_UPLOAD_ORIGINS = new Set([
+  'https://continental99.fm',
+  'https://www.continental99.fm',
+  'https://continental997.fm',
+  'https://www.continental997.fm',
+])
 
 export function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
@@ -94,12 +100,17 @@ export function createMediaOperations({
   }
 
   async function createUploadSession(request, data) {
+    const origin = request.rawRequest?.get('origin')
+    if (!RESUMABLE_UPLOAD_ORIGINS.has(origin)) {
+      throw new HttpsError('permission-denied', 'El origen no está autorizado para iniciar una carga multimedia.')
+    }
     const { operationId } = data
     const { uid } = request.auth
     await reserveUpload(data, uid)
     const file = bucket.file(`media/${operationId}`)
     try {
       const [uploadUrl] = await file.createResumableUpload({
+        origin,
         preconditionOpts: { ifGenerationMatch: 0 },
         metadata: {
           contentType: data.contentType,

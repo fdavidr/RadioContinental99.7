@@ -311,6 +311,11 @@ const bytes = Buffer.from('fake image payload')
 const sha256 = createHash('sha256').update(bytes).digest('hex')
 const request = {
   auth: { uid, token: { email_verified: true, superadmin: true } },
+  rawRequest: {
+    get(name) {
+      return name.toLowerCase() === 'origin' ? 'https://continental99.fm' : undefined
+    },
+  },
 }
 const uploadData = {
   operationId,
@@ -454,12 +459,39 @@ test('upload session requires a verified superadmin and creates only with ifGene
 
   assert.deepEqual(result, { uploadUrl: 'https://storage.googleapis.com/upload-session/1' })
   assert.equal(harness.uploadSessions[0].path, `media/${operationId}`)
+  assert.equal(harness.uploadSessions[0].options.origin, 'https://continental99.fm')
   assert.equal(harness.uploadSessions[0].options.preconditionOpts.ifGenerationMatch, 0)
   assert.equal(harness.uploadSessions[0].options.metadata.metadata.uploadedBy, uid)
   assert.equal(harness.uploadSessions[0].options.metadata.metadata.sha256, sha256)
   assert.equal(harness.objects.size, 0)
   assert.equal(harness.documents.size, 1)
   assert.equal(harness.documents.has(`media/${operationId}`), false)
+})
+
+test('upload session accepts the current www production origin', async () => {
+  const harness = createHarness()
+  await harness.operations.finalizeMediaUpload({
+    ...request,
+    rawRequest: { get: () => 'https://www.continental997.fm' },
+    data: { ...uploadData, phase: 'start' },
+  })
+
+  assert.equal(harness.uploadSessions[0].options.origin, 'https://www.continental997.fm')
+})
+
+test('upload session rejects origins outside the production allowlist before reserving', async () => {
+  const harness = createHarness()
+  await assert.rejects(
+    harness.operations.finalizeMediaUpload({
+      ...request,
+      rawRequest: { get: () => 'https://untrusted.example' },
+      data: { ...uploadData, phase: 'start' },
+    }),
+    (error) => error.code === 'permission-denied',
+  )
+
+  assert.equal(harness.uploadSessions.length, 0)
+  assert.equal(harness.documents.size, 0)
 })
 
 test('one operation ID cannot reserve sessions for different payloads concurrently', async () => {

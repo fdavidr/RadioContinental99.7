@@ -41,6 +41,23 @@ Este paquete cierra el bloqueo de la biblioteca multimedia sin confundir el fall
 | 6 | Hacer carga controlada en staging con un archivo de prueba aprobado; comprobar registro Firestore privado, lectura admin, rechazo de lectura pública antes de publicar, visibilidad pública tras publicar, y retorno a privado al despublicar/archivar. Revisar errores y objetos huérfanos sin borrarlos automáticamente. | Desarrollador + propietario; staging | Evidencia por operación, ID de documento/ruta anonimizados en auditoría, sin archivos personales. |
 | 7 | Repetir la prueba mínima en producción solo con autorización explícita, usando un archivo de prueba no sensible; eliminar/archivar mediante el procedimiento permitido y registrar el resultado. | Propietario/operador autorizado | Carga y ciclo verificados en producción, ninguna lectura no autorizada, no quedan objetos de prueba sin dueño. |
 
+### Actualización de evidencia (2026-11-13)
+
+| Punto | Estado | Resultado / siguiente paso |
+|---|---|---|
+| Cuenta runtime | VERIFICADO | La cuenta runtime existe y ambas funciones la usan; la carga real tuvo éxito. |
+| Grants IAM y acceso al bucket | PUBLICADO | El propietario confirmó roles de Datastore y acceso al bucket. |
+| Funciones y Node.js 22 | PUBLICADO | Ambas callables están `ACTIVE` en `us-central1`, runtime `nodejs22`. |
+| CORS de Functions y Storage | VERIFICADO | Los preflights de Functions devuelven 204 para los cuatro orígenes explícitos `.99.fm` y `.997.fm`; Storage CORS permite GET/PUT para los dominios configurados, sin comodines. |
+| Upload real | VERIFICADO | La imagen de prueba de 68 bytes existe en Storage y Firestore; documento actual `draft`, `private`, `isArchived=false`. El registro y el objeto se conservaron. |
+| Ciclo publicar/despublicar y lectura administrativa | VERIFICADO | La imagen se publicó, su vista previa pública cargó, se despublicó y quedó privada; la lectura administrativa del objeto privado también funcionó tras el despliegue de Storage Rules. |
+| Denegación privada a usuario no autorizado | VERIFICADO | GET anónimo al objeto privado de producción devolvió HTTP 403; Emulator también cubre usuario normal y admin no verificado. La prueba con usuario normal autenticado en producción sigue pendiente; no usar otras cuentas reales. |
+| Correspondencia del código desplegado | VERIFICADO | Los archivos fuente de ambas funciones comparten el build activo y los SHA-256 de los módulos/manifest/lock comparados coinciden con los archivos locales. |
+| Dominios canónicos | PENDIENTE | `continental99.fm` y `www.continental99.fm` no resolvieron DNS en la comprobación; `continental997.fm` sí respondió y se usó para la carga. Confirmar dominio canónico antes de retirar cualquiera de los orígenes. |
+| Artifact Registry | PENDIENTE | Repositorio `gcf-artifacts` en `us-central1`, sin política de limpieza. Propuesta no aplicada: conservar las 10 versiones más recientes por paquete y borrar únicamente versiones sin etiquetas de más de 30 días; revisar rollback antes de habilitarla. |
+| Confirmación/evidencia de producción | VERIFICADO | Transferencia, finalización, documento privado, lectura admin, publicación, lectura pública y despublicación comprobados; no representa cierre de los bloqueadores generales de lanzamiento. |
+| Usuario normal autenticado denegado en producción | PENDIENTE | Emulator valida ese rol; la prueba productiva requiere una cuenta de prueba aprobada y no se hizo durante esta intervención. |
+
 ### Criterio de diagnóstico rápido
 
 - `storage/unauthorized`: comprobar correo verificado y claim en el token renovado; después, reglas efectivas de Storage y proyecto/bucket.
@@ -70,4 +87,3 @@ Proyecto/variables confirmados
 Insumos oficiales + stream + legales ───────────────┘
                          └── aprobación y lanzamiento
 ```
-

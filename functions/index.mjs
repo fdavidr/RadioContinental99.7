@@ -11,6 +11,8 @@ if (!projectId) {
 
 const mediaRuntimeServiceAccount = 'radio-media-runtime@radio997-d5380.iam.gserviceaccount.com'
 const mediaCallableCors = [
+  'https://continental99.fm',
+  'https://www.continental99.fm',
   'https://continental997.fm',
   'https://www.continental997.fm',
 ]

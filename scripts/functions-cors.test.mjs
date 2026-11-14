@@ -6,7 +6,7 @@ const functionsSource = await readFile(new URL('../functions/index.mjs', import.
 const clientSource = await readFile(new URL('../src/lib/firebaseFunctions.ts', import.meta.url), 'utf8')
 
 test('media callable functions restrict CORS to the production site origins', () => {
-  assert.match(functionsSource, /const mediaCallableCors = \[\s*'https:\/\/continental997\.fm',\s*'https:\/\/www\.continental997\.fm',?\s*\]/)
+  assert.match(functionsSource, /const mediaCallableCors = \[\s*'https:\/\/continental99\.fm',\s*'https:\/\/www\.continental99\.fm',\s*'https:\/\/continental997\.fm',\s*'https:\/\/www\.continental997\.fm',?\s*\]/)
   assert.equal((functionsSource.match(/cors: mediaCallableCors/g) ?? []).length, 2)
   assert.equal((functionsSource.match(/invoker: 'public'/g) ?? []).length, 2)
   assert.equal((functionsSource.match(/region: 'us-central1'/g) ?? []).length, 2)
